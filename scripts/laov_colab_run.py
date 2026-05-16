@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# LiveActionAOV — Colab / Docker batch runner (reads Desk batch JSON).
+# LiveActionAOV — Colab / headless batch runner (reads Desk batch JSON).
 """Execute LAOV jobs produced by Google Desk (LAOV_STANDALONE).
 
 Expects:
   - ``LAOV_DRIVE_MOUNT`` — absolute path where Google Drive ``MyDrive`` is mounted
-    (e.g. ``/data`` in Docker, ``/content/drive/MyDrive`` in Colab fallback).
+    (e.g. ``/content/drive/MyDrive`` on Colab with Drive mounted).
   - ``--job-json`` — path to batch config JSON.
 
 Each sequence must define ``plate_folder_drive_relative`` and
