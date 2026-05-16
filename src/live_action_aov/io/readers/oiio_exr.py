@@ -3,16 +3,16 @@
 # Developed with Claude (Anthropic)
 # License: MIT
 
-"""EXR reader via OpenImageIO.
+"""Plate sequence reader via OpenImageIO (EXR, JPEG, PNG, …).
 
 Handles the common frame-number expansion patterns:
 
-- `shot.####.exr` (four hashes = zero-padded frame number)
+- `shot.####.exr` / `shot.####.jpg` (hashes = zero-padded frame number)
 - `shot.%04d.exr` (printf-style)
 - `shot.0001.exr` (literal, matches one frame)
 
-Enumeration scans the folder once on first access and caches the frame
-list. Pixel aspect is preserved from the first frame's header.
+The file extension is taken from ``sequence_pattern`` so one class serves
+all still formats OIIO can decode.
 """
 
 from __future__ import annotations
@@ -23,15 +23,24 @@ from typing import Any
 
 import numpy as np
 
-from live_action_aov.io.oiio_io import read_exr
+from live_action_aov.io.oiio_io import read_plate
 from live_action_aov.io.readers.base import ImageSequenceReader
 
 
+def _plate_ext_from_pattern(sequence_pattern: str) -> str:
+    """``hero.####.jpg`` → ``.jpg``; missing suffix defaults to ``.exr``."""
+    suf = Path(sequence_pattern).suffix.lower()
+    return suf if suf else ".exr"
+
+
 class OIIOExrReader(ImageSequenceReader):
-    extensions = (".exr",)
+    """Backwards-compatible name — reads EXR, JPEG, and other OIIO stills."""
+
+    extensions = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp")
 
     def __init__(self, folder: Path, sequence_pattern: str) -> None:
         super().__init__(folder, sequence_pattern)
+        self._plate_ext = _plate_ext_from_pattern(sequence_pattern)
         self._frames: dict[int, Path] | None = None
         self._first_attrs: dict[str, Any] | None = None
         self._first_pixels_shape: tuple[int, ...] | None = None
@@ -44,7 +53,7 @@ class OIIOExrReader(ImageSequenceReader):
         regex = _pattern_to_regex(self.sequence_pattern)
         frames: dict[int, Path] = {}
         for entry in sorted(self.folder.iterdir()):
-            if not entry.is_file() or entry.suffix.lower() != ".exr":
+            if not entry.is_file() or entry.suffix.lower() != self._plate_ext:
                 continue
             m = regex.match(entry.name)
             if not m:
@@ -65,7 +74,7 @@ class OIIOExrReader(ImageSequenceReader):
             return
         frames = self._enumerate()
         first_idx = min(frames)
-        pixels, attrs = read_exr(frames[first_idx])
+        pixels, attrs = read_plate(frames[first_idx])
         self._first_attrs = attrs
         self._first_pixels_shape = pixels.shape
 
@@ -92,7 +101,7 @@ class OIIOExrReader(ImageSequenceReader):
             raise FileNotFoundError(
                 f"Frame {frame} not present in sequence; available: {min(frames)}..{max(frames)}"
             )
-        return read_exr(frames[frame])
+        return read_plate(frames[frame])
 
 
 def _pattern_to_regex(pattern: str) -> re.Pattern[str]:
@@ -119,4 +128,4 @@ def _pattern_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("^" + re.escape(pattern) + "$")
 
 
-__all__ = ["OIIOExrReader"]
+__all__ = ["OIIOExrReader", "_plate_ext_from_pattern"]

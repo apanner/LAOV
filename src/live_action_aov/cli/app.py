@@ -16,7 +16,6 @@ Phase 4 fleshes this out with discover / analyze / run / preflight / models.
 
 from __future__ import annotations
 
-import re
 import signal
 from pathlib import Path
 from typing import Annotated
@@ -30,7 +29,7 @@ from live_action_aov.core.cancel import CancelledError, CancelToken
 from live_action_aov.core.job import Job, PassConfig, Shot
 from live_action_aov.core.pass_base import License
 from live_action_aov.core.registry import get_registry
-from live_action_aov.io.readers.oiio_exr import OIIOExrReader
+from live_action_aov.io.sequence_sniff import sniff_plate_sequence
 
 app = typer.Typer(
     name="liveaov",
@@ -213,8 +212,8 @@ def run_shot(
         )
         raise typer.Exit(code=2)
 
-    # Discover the sequence — find one EXR, derive a `####` pattern.
-    pattern, frame_range, resolution, pixel_aspect = _sniff_sequence(folder)
+    # Discover the sequence — EXR / JPEG / … (see `sequence_sniff`).
+    pattern, frame_range, resolution, pixel_aspect, _ = sniff_plate_sequence(folder)
     shot = Shot(
         name=folder.name,
         folder=folder,
@@ -382,38 +381,9 @@ def _resolve_semantic_passes(
 
 
 def _sniff_sequence(folder: Path) -> tuple[str, tuple[int, int], tuple[int, int], float]:
-    """Find an EXR sequence in `folder` and derive its pattern + metadata."""
-    # Skip sidecar EXRs from previous runs — the sidecar writer injects
-    # `.utility.`, `.hero.`, or `.mask.` before the frame token (see
-    # `executors.local._sidecar_pattern`). sorted() puts them before the
-    # plate alphabetically, which would otherwise make the sniffer pick
-    # up e.g. 2-channel utility files and feed them into the display-
-    # transform luma dot-product as a (H,W,2)@(3,) matmul crash.
-    _SIDECAR_TOKENS = (".utility.", ".hero.", ".mask.")
-    exrs = sorted(
-        p
-        for p in folder.iterdir()
-        if p.is_file()
-        and p.suffix.lower() == ".exr"
-        and not any(tok in p.name for tok in _SIDECAR_TOKENS)
-    )
-    if not exrs:
-        raise FileNotFoundError(f"No .exr files found in {folder}")
-    # Pick the first one, extract its frame-number component.
-    sample = exrs[0].name
-    m = re.search(r"(\d{3,})(?=[^\d]*\.exr$)", sample)
-    if not m:
-        pattern = sample  # treat as a single-frame literal
-    else:
-        width = len(m.group(1))
-        pattern = sample[: m.start()] + ("#" * width) + sample[m.end() :]
-    reader = OIIOExrReader(folder, pattern)
-    return (
-        pattern,
-        reader.frame_range(),
-        reader.resolution(),
-        reader.pixel_aspect(),
-    )
+    """Back-compat shim — prefer :func:`sniff_plate_sequence` in new code."""
+    p, r, res, pa, _ = sniff_plate_sequence(folder)
+    return p, r, res, pa
 
 
 def main() -> None:

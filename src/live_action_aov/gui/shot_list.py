@@ -4,11 +4,10 @@ A `QListWidget` with an "Add shot…" button at the top. Each list entry
 shows the shot name + frame count; selection emits through the shared
 `ShotRegistry` so the viewport and inspector refresh together.
 
-"Add shot" opens a folder picker, auto-discovers an EXR sequence
-(skipping `.utility.` / `.hero.` / `.mask.` sidecars the way the CLI
-does), probes the first frame's header for colorspace, and registers
-a new `ShotState`. Drag-and-drop of folders onto the list is also
-wired — that's the muscle-memory VFX compers have.
+"Add shot" opens a folder picker, auto-discovers a plate sequence (EXR,
+JPEG, same rules as the CLI), probes the first frame for colorspace, and
+registers a new `ShotState`. Drag-and-drop of folders onto the list is
+also wired — that's the muscle-memory VFX compers have.
 
 Pass the discovery errors through to a `QMessageBox` so a bad folder
 gives a loud, recoverable failure rather than a silent no-op.
@@ -16,7 +15,6 @@ gives a loud, recoverable failure rather than a silent no-op.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import numpy as np
@@ -37,9 +35,8 @@ from live_action_aov.core.pass_base import DisplayTransformParams
 from live_action_aov.gui.shot_state import ShotRegistry, ShotState
 from live_action_aov.io.colorspace_detect import detect_colorspace
 from live_action_aov.io.display_transform import DisplayTransform
-from live_action_aov.io.oiio_io import read_exr
-
-_SIDECAR_TOKENS = (".utility.", ".hero.", ".mask.")
+from live_action_aov.io.oiio_io import read_plate
+from live_action_aov.io.sequence_sniff import sniff_plate_sequence
 
 
 class ShotListPanel(QWidget):
@@ -132,18 +129,18 @@ class ShotListPanel(QWidget):
 
     def _add_shot_from_folder(self, folder: Path) -> None:
         try:
-            pattern, frame_range, resolution, pixel_aspect, first_frame_path = _sniff_sequence(
+            pattern, frame_range, resolution, pixel_aspect, first_frame_path = sniff_plate_sequence(
                 folder
             )
         except FileNotFoundError as e:
-            QMessageBox.warning(self, "No EXR sequence found", str(e))
+            QMessageBox.warning(self, "No plate sequence found", str(e))
             return
 
         # Probe the first frame's header + pixels for colorspace detection.
         # Pixels enable the lying-tag heuristic; the header gives the
         # authoritative answer when it exists.
         try:
-            pixels, attrs = read_exr(first_frame_path)
+            pixels, attrs = read_plate(first_frame_path)
         except Exception as e:
             QMessageBox.warning(self, "Could not read first frame", str(e))
             return
@@ -318,69 +315,6 @@ def _format_item_tooltip(shot: ShotState) -> str:
     if shot.detected is not None:
         lines.append(f"Colorspace: {shot.colorspace_label()}")
     return "<br/>".join(lines)
-
-
-def _sniff_sequence(
-    folder: Path,
-) -> tuple[str, tuple[int, int], tuple[int, int], float, Path]:
-    """Discover an EXR sequence in `folder` and return `(pattern,
-    frame_range, resolution, pixel_aspect, first_frame_path)`.
-
-    Handles messy real-world folders:
-      - Multiple sequences (picks the one with the most frames).
-      - Extra files (`.lut`, `.txt`, screenshots, single-file refs) —
-        silently ignored, they don't contribute to any pattern.
-      - Sidecars from prior runs (`.utility.`, `.hero.`, `.mask.`) —
-        filtered out before sniffing so a re-added shot doesn't latch
-        onto its own output.
-
-    Algorithm: for each EXR, derive a template by replacing its final
-    digit-run before `.exr` with `#` of the same width. Group files by
-    template; pick the template with the most files. The frame range
-    comes from the min/max of the frame numbers in that group.
-    """
-    candidates = [
-        p
-        for p in folder.iterdir()
-        if p.is_file()
-        and p.suffix.lower() == ".exr"
-        and not any(tok in p.name for tok in _SIDECAR_TOKENS)
-    ]
-    if not candidates:
-        raise FileNotFoundError(f"No .exr plate files found in {folder}")
-
-    # Each file contributes a (pattern, frame_number) if the last
-    # digit-run before `.exr` is parseable; otherwise the file is
-    # silently skipped (single-frame reference, etc.).
-    groups: dict[str, list[tuple[int, Path]]] = {}
-    tail_digits_re = re.compile(r"(\d+)(?=\.exr$)", re.IGNORECASE)
-    for p in candidates:
-        m = tail_digits_re.search(p.name)
-        if not m:
-            continue
-        digits = m.group(1)
-        width = len(digits)
-        pattern = p.name[: m.start()] + ("#" * width) + p.name[m.end() :]
-        groups.setdefault(pattern, []).append((int(digits), p))
-
-    if not groups:
-        raise FileNotFoundError(
-            f"No sequenced .exr files found in {folder} "
-            "(single-file references and non-sequenced names were skipped)."
-        )
-
-    # Biggest sequence wins. Break ties by lexicographic pattern so the
-    # choice is deterministic across runs.
-    best_pattern = max(groups.keys(), key=lambda k: (len(groups[k]), -ord(k[0]) if k else 0))
-    entries = sorted(groups[best_pattern], key=lambda t: t[0])
-    frame_numbers = [f for f, _ in entries]
-    frame_range = (min(frame_numbers), max(frame_numbers))
-    first_frame_path = entries[0][1]
-
-    pixels, attrs = read_exr(first_frame_path)
-    h, w = pixels.shape[:2]
-    par = float(attrs.get("pixelAspectRatio", 1.0))
-    return best_pattern, frame_range, (w, h), par, first_frame_path
 
 
 __all__ = ["ShotListPanel"]

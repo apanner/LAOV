@@ -48,18 +48,17 @@ def require_oiio() -> None:
 # ---------------------------------------------------------------------------
 
 
-def read_exr(path: Path | str) -> tuple[np.ndarray, dict[str, Any]]:
-    """Read an EXR file. Returns `(pixels, attrs)`.
+def read_plate(path: Path | str) -> tuple[np.ndarray, dict[str, Any]]:
+    """Read a still plate (EXR, JPEG, PNG, …) via OpenImageIO.
 
-    `pixels`: (H, W, C) float32 array, channel order as in the file.
-    `attrs`: dict of EXR header attributes (names stringified). Nuke-written
-    files carry hundreds of attributes; we expose the full set so downstream
-    metadata extraction can pick whatever it needs.
+    Returns `(pixels, attrs)` with `pixels` as (H, W, C) float32 in a
+    display-friendly range: UINT8/UINT16 sources are normalized to ~[0, 1]
+    by OIIO when reading as FLOAT. EXR / float sources pass through as stored.
     """
     require_oiio()
     inp = oiio.ImageInput.open(str(path))
     if inp is None:
-        raise OiioError(f"Failed to open EXR: {path} ({oiio.geterror()})")
+        raise OiioError(f"Failed to open image: {path} ({oiio.geterror()})")
     try:
         spec = inp.spec()
         pixels = inp.read_image(format=oiio.FLOAT)
@@ -69,6 +68,11 @@ def read_exr(path: Path | str) -> tuple[np.ndarray, dict[str, Any]]:
         return _ensure_hwc(pixels, spec), attrs
     finally:
         inp.close()
+
+
+def read_exr(path: Path | str) -> tuple[np.ndarray, dict[str, Any]]:
+    """Read an EXR file — same pipeline as :func:`read_plate`."""
+    return read_plate(path)
 
 
 def _ensure_hwc(pixels: Any, spec: Any) -> np.ndarray:
@@ -177,4 +181,4 @@ def _set_attr(spec: Any, name: str, value: Any) -> None:
         spec.attribute(name, str(value))
 
 
-__all__ = ["HAS_OIIO", "OiioError", "read_exr", "require_oiio", "write_exr"]
+__all__ = ["HAS_OIIO", "OiioError", "read_plate", "read_exr", "require_oiio", "write_exr"]
