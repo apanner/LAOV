@@ -6,7 +6,7 @@ Colab already ships a CUDA `torch` / `torchvision` build. A full
 second PyTorch wheel and always installs `PySide6` (GUI), which is unused
 on Colab.
 
-Workflow (see `laov_cellcode_template.py` fallback):
+Workflow (Google Desk `laov_cellcode_template.py` on Colab):
 
 1. `pip install -e /path/to/LAOV --no-deps`
 2. `python scripts/colab_setup.py`  — installs only import-missing packages below.
