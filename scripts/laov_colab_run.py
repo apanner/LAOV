@@ -38,35 +38,105 @@ def _drive_mount() -> Path:
     return Path(raw).resolve()
 
 
+_PLATE_SUFFIXES = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".dpx", ".tga")
+
+
+def _folder_has_plates(folder: Path) -> bool:
+    if not folder.is_dir():
+        return False
+    try:
+        for entry in folder.iterdir():
+            if entry.is_file() and entry.suffix.lower() in _PLATE_SUFFIXES:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _resolve_plate_dir(mount: Path, rel_plate: str) -> Path | None:
-    """Try common Desk/Drive path layouts."""
+    """Try Desk/Drive path layouts; fuzzy-match sibling folders (e.g. TB_005_010 → TB_005_010_1)."""
     rel = rel_plate.strip().strip("/").replace("\\", "/")
     if not rel:
         return None
+
     candidates: list[Path] = [mount / rel]
     if rel.startswith("VDA_input/"):
-        candidates.append(mount / rel[len("VDA_input/") :])
+        inner = rel[len("VDA_input/") :]
+        if inner:
+            candidates.append(mount / "VDA_input" / inner)
     else:
         candidates.append(mount / "VDA_input" / rel)
+
     seen: set[str] = set()
     for path in candidates:
         key = str(path)
         if key in seen:
             continue
         seen.add(key)
-        if path.is_dir():
+        if path.is_dir() and _folder_has_plates(path):
             return path.resolve()
+
+    rel_path = Path(rel)
+    parent_rel = rel_path.parent
+    leaf = rel_path.name
+    if not leaf:
+        return None
+    parent = mount / parent_rel
+    if not parent.is_dir():
+        if str(parent_rel).startswith("VDA_input/"):
+            parent = mount / parent_rel
+        elif parent_rel.parts:
+            parent = mount / "VDA_input" / parent_rel
+    if not parent.is_dir():
+        return None
+
+    fuzzy: list[Path] = []
+    try:
+        for child in sorted(parent.iterdir()):
+            if not child.is_dir():
+                continue
+            name = child.name
+            if name == leaf or name.startswith(leaf + "_") or name.startswith(leaf + "."):
+                if _folder_has_plates(child):
+                    fuzzy.append(child)
+    except OSError:
+        return None
+
+    if len(fuzzy) == 1:
+        chosen = fuzzy[0].resolve()
+        _log.warning(
+            "Plate path %r not found; using %s",
+            rel_plate,
+            chosen.relative_to(mount),
+        )
+        return chosen
+    if len(fuzzy) > 1:
+        fuzzy.sort(key=lambda p: (-sum(1 for _ in p.iterdir()), len(p.name)))
+        chosen = fuzzy[0].resolve()
+        _log.warning(
+            "Plate path %r ambiguous (%d matches); using %s",
+            rel_plate,
+            len(fuzzy),
+            chosen.relative_to(mount),
+        )
+        return chosen
     return None
 
 
 def _format_plate_hint(mount: Path, rel_plate: str) -> str:
     lines = [f"  mount: {mount}", f"  plate_folder_drive_relative: {rel_plate!r}"]
-    tried = _resolve_plate_dir(mount, rel_plate)
-    if tried is None:
-        lines.append("  tried:")
-        rel = rel_plate.strip().strip("/")
-        for p in (mount / rel, mount / "VDA_input" / rel):
-            lines.append(f"    - {p}  exists={p.exists()} dir={p.is_dir()}")
+    rel = rel_plate.strip().strip("/")
+    lines.append("  tried:")
+    for p in (mount / rel, mount / "VDA_input" / rel):
+        lines.append(f"    - {p}  exists={p.exists()} dir={p.is_dir()}")
+    rel_path = Path(rel)
+    parent = mount / rel_path.parent
+    if parent.is_dir():
+        try:
+            kids = sorted(x.name for x in parent.iterdir() if x.is_dir())[:20]
+            lines.append(f"  subfolders of {parent.name}/: {kids}")
+        except OSError:
+            pass
     vda = mount / "VDA_input"
     if vda.is_dir():
         try:

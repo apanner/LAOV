@@ -9,7 +9,7 @@ This document matches the **LAOV_STANDALONE** flow from `google_desk_app` (`run_
 1. **GPU runtime** (Runtime → Change runtime type → **GPU**).
 2. Mount Drive and load the batch JSON (your Desk-generated notebook cells).
 3. **`git clone`** `LAOV_GIT_URL` (default `https://github.com/apanner/LAOV.git`).
-4. **`pip install -e . --no-deps`** then **`python scripts/colab_setup.py`** to install only missing packages (reuses Colab’s `torch` / `torchvision`, does **not** install **PySide6**).
+4. **`pip install -e . --no-deps`** then **`python scripts/colab_setup.py`** to install the full Colab dependency bundle (reuses Colab’s `torch` / `torchvision`, does **not** install **PySide6**, does **not** downgrade numpy).
 5. **`python scripts/laov_colab_run.py --job-json ...`** with `LAOV_DRIVE_MOUNT=/content/drive/MyDrive`.
 
 If `colab_setup.py` is missing from the clone, the cell falls back to **`pip install -e ".[matte,dsine]"`**.
