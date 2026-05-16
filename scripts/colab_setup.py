@@ -36,6 +36,8 @@ REQUIRED_IMPORTS: dict[str, str] = {
     "geffnet": "geffnet>=1.0",
     "tokenizers": "tokenizers",
     "safetensors": "safetensors",
+    "cv2": "opencv-python-headless>=4.8",
+    "scipy": "scipy>=1.11",
 }
 
 TORCH_MODULES = ("torch", "torchvision")
@@ -43,6 +45,22 @@ TORCH_MODULES = ("torch", "torchvision")
 
 def _has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
+
+
+def _ensure_numpy1() -> None:
+    """LAOV pins numpy<2; Colab often ships numpy 2.x."""
+    try:
+        import numpy as np
+
+        major = int(str(np.__version__).split(".")[0])
+    except Exception:
+        return
+    if major >= 2:
+        print("[INSTALL] Colab numpy 2.x detected — installing numpy>=1.26,<2.0 for LAOV...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "numpy>=1.26,<2.0"],
+            check=True,
+        )
 
 
 def ensure_laov_colab_dependencies() -> list[str]:
@@ -54,6 +72,8 @@ def ensure_laov_colab_dependencies() -> list[str]:
             + ", ".join(missing_torch)
             + ". Use Runtime → Change runtime type → GPU, then re-run."
         )
+
+    _ensure_numpy1()
 
     to_install: list[str] = []
     seen: set[str] = set()
@@ -67,15 +87,27 @@ def ensure_laov_colab_dependencies() -> list[str]:
 
     if not to_install:
         print("[OK] LAOV Colab: core Python deps already present.")
-        return []
+    else:
+        print("[INSTALL] LAOV Colab missing packages: " + ", ".join(to_install))
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", *to_install],
+            check=True,
+        )
+        print("[OK] LAOV Colab dependency install finished.")
 
-    print("[INSTALL] LAOV Colab missing packages: " + ", ".join(to_install))
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", *to_install],
-        check=True,
-    )
-    print("[OK] LAOV Colab dependency install finished.")
+    _verify_oiio()
     return to_install
+
+
+def _verify_oiio() -> None:
+    try:
+        import OpenImageIO as oiio  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "OpenImageIO (oiio-python) failed to import after install. "
+            "Try: pip install -q oiio-python>=2.5 opencolorio>=2.3"
+        ) from exc
+    print("[OK] OpenImageIO import check passed.")
 
 
 if __name__ == "__main__":

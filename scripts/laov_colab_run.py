@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 
 _log = logging.getLogger("laov_colab_run")
@@ -33,12 +34,59 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _drive_mount() -> Path:
-    raw = os.environ.get("LAOV_DRIVE_MOUNT", "/data")
+    raw = os.environ.get("LAOV_DRIVE_MOUNT", "/content/drive/MyDrive")
     return Path(raw).resolve()
+
+
+def _resolve_plate_dir(mount: Path, rel_plate: str) -> Path | None:
+    """Try common Desk/Drive path layouts."""
+    rel = rel_plate.strip().strip("/").replace("\\", "/")
+    if not rel:
+        return None
+    candidates: list[Path] = [mount / rel]
+    if rel.startswith("VDA_input/"):
+        candidates.append(mount / rel[len("VDA_input/") :])
+    else:
+        candidates.append(mount / "VDA_input" / rel)
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.is_dir():
+            return path.resolve()
+    return None
+
+
+def _format_plate_hint(mount: Path, rel_plate: str) -> str:
+    lines = [f"  mount: {mount}", f"  plate_folder_drive_relative: {rel_plate!r}"]
+    tried = _resolve_plate_dir(mount, rel_plate)
+    if tried is None:
+        lines.append("  tried:")
+        rel = rel_plate.strip().strip("/")
+        for p in (mount / rel, mount / "VDA_input" / rel):
+            lines.append(f"    - {p}  exists={p.exists()} dir={p.is_dir()}")
+    vda = mount / "VDA_input"
+    if vda.is_dir():
+        try:
+            kids = sorted(x.name for x in vda.iterdir())[:12]
+            lines.append(f"  VDA_input/ (first entries): {kids}")
+        except OSError:
+            pass
+    return "\n".join(lines)
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    try:
+        return _main_impl()
+    except Exception:
+        _log.error("LAOV batch runner crashed:\n%s", traceback.format_exc())
+        return 1
+
+
+def _main_impl() -> int:
     args = _parse_args()
     job_path = Path(args.job_json).resolve()
     if not job_path.is_file():
@@ -53,16 +101,29 @@ def main() -> int:
         return 1
 
     mount = _drive_mount()
+    if not mount.is_dir():
+        _log.error("Drive mount not found: %s (mount Drive in Cell 1)", mount)
+        return 1
+    _log.info("Drive mount: %s", mount)
+
     passes_csv = str(shared.get("passes_csv", "depth,normals,flow,matte"))
     raw_names = [x.strip() for x in passes_csv.split(",") if x.strip()]
 
-    from live_action_aov.cli.app import (  # type: ignore[attr-defined]
-        _resolve_semantic_passes,
-        _sniff_sequence,
-    )
-    from live_action_aov.core.job import Job, PassConfig, Shot
-    from live_action_aov.core.registry import get_registry
-    from live_action_aov import run as laov_run
+    try:
+        from live_action_aov.cli.app import (  # type: ignore[attr-defined]
+            _resolve_semantic_passes,
+            _sniff_sequence,
+        )
+        from live_action_aov.core.job import Job, PassConfig, Shot
+        from live_action_aov.core.registry import get_registry
+        from live_action_aov import run as laov_run
+        from live_action_aov.io.oiio_io import require_oiio
+
+        require_oiio()
+    except Exception as exc:
+        _log.error("LAOV import/setup failed: %s", exc)
+        _log.error("%s", traceback.format_exc())
+        return 1
 
     depth_backend = str(shared.get("depth_backend", "depth_anything_v2"))
     normals_backend = str(shared.get("normals_backend", "dsine"))
@@ -94,9 +155,10 @@ def main() -> int:
             _log.error("Non-commercial pass %s (%s) — set allow_noncommercial in Desk.", n, spdx)
         return 2
 
-    out_folder_path = str(shared.get("output_folder_path", "VDA_Jobs/results")).strip("/")
+    out_folder_path = str(shared.get("output_folder_path", "VDA_output")).strip("/")
     date_folder = str(os.environ.get("LAOV_RUNTIME_DATE_FOLDER", "")).strip().strip("/")
 
+    any_failed = False
     for seq in sequences:
         rel_plate = str(seq.get("plate_folder_drive_relative", "")).strip().strip("/").replace("\\", "/")
         rel_side = str(seq.get("sidecar_output_drive_subpath", "")).strip().strip("/").replace("\\", "/")
@@ -104,10 +166,12 @@ def main() -> int:
         if not rel_plate:
             _log.error("Sequence missing plate_folder_drive_relative")
             return 1
-        plate_dir = (mount / rel_plate).resolve()
-        if not plate_dir.is_dir():
-            _log.error("Plate folder not found: %s", plate_dir)
+
+        plate_dir = _resolve_plate_dir(mount, rel_plate)
+        if plate_dir is None:
+            _log.error("Plate folder not found.\n%s", _format_plate_hint(mount, rel_plate))
             return 1
+
         output_dir: Path | None
         if rel_side:
             if date_folder:
@@ -118,7 +182,12 @@ def main() -> int:
         else:
             output_dir = None
 
-        pattern, sniffed_range, resolution, pixel_aspect = _sniff_sequence(plate_dir)
+        try:
+            pattern, sniffed_range, resolution, pixel_aspect = _sniff_sequence(plate_dir)
+        except FileNotFoundError as exc:
+            _log.error("No plate sequence in %s: %s", plate_dir, exc)
+            return 1
+
         j0 = int(seq.get("first_frame", sniffed_range[0]))
         j1 = int(seq.get("last_frame", sniffed_range[1]))
         s0, s1 = sniffed_range
@@ -134,6 +203,16 @@ def main() -> int:
             )
             f0, f1 = s0, s1
 
+        _log.info(
+            "Shot %s: plate=%s pattern=%s frames=%s-%s output=%s",
+            shot_name,
+            plate_dir,
+            pattern,
+            f0,
+            f1,
+            output_dir,
+        )
+
         shot = Shot(
             name=shot_name,
             folder=plate_dir,
@@ -148,9 +227,22 @@ def main() -> int:
             proxy_long_edge=proxy_long_edge,
         )
         job = Job(shot=shot, passes=[PassConfig(name=n) for n in pass_names])
-        _log.info("Running shot=%s passes=%s output_dir=%s", shot_name, pass_names, output_dir)
-        laov_run(job)
-        _log.info("Done shot=%s status=%s", shot_name, job.shot.status)
+        try:
+            laov_run(job)
+        except Exception:
+            _log.error("LAOV run failed for shot %s:\n%s", shot_name, traceback.format_exc())
+            any_failed = True
+            continue
+
+        if shot.status != "done":
+            _log.error("Shot %s finished with status=%s (expected done)", shot_name, shot.status)
+            any_failed = True
+        else:
+            _log.info("Done shot=%s status=%s", shot_name, shot.status)
+
+    if any_failed:
+        _log.error("One or more shots failed.")
+        return 1
 
     _log.info("All sequences complete.")
     return 0
