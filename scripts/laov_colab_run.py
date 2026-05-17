@@ -53,8 +53,75 @@ def _folder_has_plates(folder: Path) -> bool:
     return False
 
 
+def _leaf_matches_dir(name: str, leaf: str) -> bool:
+    if not leaf:
+        return False
+    return name == leaf or name.startswith(leaf + "_") or name.startswith(leaf + ".")
+
+
+def _search_under_vda_input(mount: Path, leaf: str, *, max_depth: int = 8) -> list[Path]:
+    """Find plate folders under MyDrive/VDA_input when Desk path omits parents (e.g. LOT_test/)."""
+    vda = mount / "VDA_input"
+    if not vda.is_dir() or not leaf:
+        return []
+    matches: list[Path] = []
+
+    def walk(folder: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            children = sorted(folder.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if not child.is_dir():
+                continue
+            if _leaf_matches_dir(child.name, leaf) and _folder_has_plates(child):
+                matches.append(child)
+            walk(child, depth + 1)
+
+    walk(vda, 0)
+    return matches
+
+
+def _pick_best_plate_match(mount: Path, rel_plate: str, matches: list[Path]) -> Path | None:
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0].resolve()
+    rel_norm = rel_plate.strip().strip("/").replace("\\", "/")
+    rel_parts = [p for p in Path(rel_norm).parts if p and p != "VDA_input"]
+    scored: list[tuple[int, int, Path]] = []
+    for path in matches:
+        try:
+            rel_to_mount = path.relative_to(mount).as_posix()
+        except ValueError:
+            rel_to_mount = str(path)
+        parts = [p for p in Path(rel_to_mount).parts if p and p != "VDA_input"]
+        overlap = 0
+        for a, b in zip(reversed(rel_parts), reversed(parts)):
+            if a == b:
+                overlap += 1
+            else:
+                break
+        try:
+            frame_count = sum(1 for e in path.iterdir() if e.is_file())
+        except OSError:
+            frame_count = 0
+        scored.append((overlap, frame_count, path))
+    scored.sort(key=lambda t: (-t[0], -t[1], len(t[2].parts)))
+    chosen = scored[0][2].resolve()
+    _log.warning(
+        "Plate path %r matched %d folder(s) under VDA_input; using %s",
+        rel_plate,
+        len(matches),
+        chosen.relative_to(mount),
+    )
+    return chosen
+
+
 def _resolve_plate_dir(mount: Path, rel_plate: str) -> Path | None:
-    """Try Desk/Drive path layouts; fuzzy-match sibling folders (e.g. TB_005_010 → TB_005_010_1)."""
+    """Try Desk/Drive path layouts; fuzzy siblings; recursive search under VDA_input."""
     rel = rel_plate.strip().strip("/").replace("\\", "/")
     if not rel:
         return None
@@ -87,39 +154,30 @@ def _resolve_plate_dir(mount: Path, rel_plate: str) -> Path | None:
             parent = mount / parent_rel
         elif parent_rel.parts:
             parent = mount / "VDA_input" / parent_rel
-    if not parent.is_dir():
-        return None
-
-    fuzzy: list[Path] = []
-    try:
-        for child in sorted(parent.iterdir()):
-            if not child.is_dir():
-                continue
-            name = child.name
-            if name == leaf or name.startswith(leaf + "_") or name.startswith(leaf + "."):
-                if _folder_has_plates(child):
+    if parent.is_dir():
+        fuzzy: list[Path] = []
+        try:
+            for child in sorted(parent.iterdir()):
+                if not child.is_dir():
+                    continue
+                if _leaf_matches_dir(child.name, leaf) and _folder_has_plates(child):
                     fuzzy.append(child)
-    except OSError:
-        return None
+        except OSError:
+            fuzzy = []
+        if len(fuzzy) == 1:
+            chosen = fuzzy[0].resolve()
+            _log.warning(
+                "Plate path %r not found; using %s",
+                rel_plate,
+                chosen.relative_to(mount),
+            )
+            return chosen
+        if len(fuzzy) > 1:
+            return _pick_best_plate_match(mount, rel_plate, fuzzy)
 
-    if len(fuzzy) == 1:
-        chosen = fuzzy[0].resolve()
-        _log.warning(
-            "Plate path %r not found; using %s",
-            rel_plate,
-            chosen.relative_to(mount),
-        )
-        return chosen
-    if len(fuzzy) > 1:
-        fuzzy.sort(key=lambda p: (-sum(1 for _ in p.iterdir()), len(p.name)))
-        chosen = fuzzy[0].resolve()
-        _log.warning(
-            "Plate path %r ambiguous (%d matches); using %s",
-            rel_plate,
-            len(fuzzy),
-            chosen.relative_to(mount),
-        )
-        return chosen
+    nested = _search_under_vda_input(mount, leaf)
+    if nested:
+        return _pick_best_plate_match(mount, rel_plate, nested)
     return None
 
 

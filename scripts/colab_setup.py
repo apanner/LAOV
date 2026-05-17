@@ -71,8 +71,8 @@ def _pip_install(*specs: str, quiet: bool = True) -> None:
     subprocess.run(cmd, check=True)
 
 
-def ensure_laov_colab_dependencies(*, full: bool = True) -> None:
-    """Install Colab deps. ``full=True`` (default) reinstalls the full COLAB_PIP_DEPS set."""
+def ensure_laov_colab_dependencies(*, full: bool = False) -> None:
+    """Install Colab deps. ``full=False`` (default) installs only missing imports."""
     missing_torch = [m for m in TORCH_MODULES if not _has_module(m)]
     if missing_torch:
         raise RuntimeError(
@@ -128,9 +128,9 @@ def _verify_imports() -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LAOV Colab dependency installer")
     parser.add_argument(
-        "--minimal",
+        "--full",
         action="store_true",
-        help="Only install packages that are not already importable.",
+        help="Reinstall the full COLAB_PIP_DEPS bundle (default: only missing packages).",
     )
     args = parser.parse_args()
-    ensure_laov_colab_dependencies(full=not args.minimal)
+    ensure_laov_colab_dependencies(full=args.full)

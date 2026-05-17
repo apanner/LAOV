@@ -9,7 +9,7 @@ This document matches the **LAOV_STANDALONE** flow from `google_desk_app` (`run_
 1. **GPU runtime** (Runtime → Change runtime type → **GPU**).
 2. Mount Drive and load the batch JSON (your Desk-generated notebook cells).
 3. **`git clone`** `LAOV_GIT_URL` (default `https://github.com/apanner/LAOV.git`).
-4. **`pip install -e . --no-deps`** then **`python scripts/colab_setup.py`** to install the full Colab dependency bundle.
+4. **`pip install -e . --no-deps`** then **`python scripts/colab_setup.py`** (installs **only missing** packages; use `--full` to reinstall everything).
 5. **`python scripts/laov_colab_run.py --job-json ...`** with `LAOV_DRIVE_MOUNT=/content/drive/MyDrive`.
 
 ## Output layout (default: split folders)
@@ -38,6 +38,10 @@ Inference time is unchanged; split mode mainly saves **disk write time** and **c
 | Variable | Meaning |
 |----------|---------|
 | `LAOV_DRIVE_MOUNT` | Drive root containing `VDA_input/...` (Colab: `/content/drive/MyDrive`). |
+
+**Plate path:** batch JSON should use the full Drive-relative folder (e.g. `VDA_input/LOT_test/TB_005_010_1`). If Desk sends only `VDA_input/TB_005_010_1`, `laov_colab_run.py` searches under `VDA_input/` for a matching plate folder (same idea as the LOT desk path fix).
+
+**Pip warnings** after `pip install -e --no-deps` about `pyside6` or `numpy<2` are expected on Colab (GUI deps are not installed; Colab ships numpy 2.x). They do not block the run if `colab_setup.py` reports import OK.
 | `LAOV_RUNTIME_DATE_FOLDER` | `YYYYMMDD` under your output path. |
 | `LAOV_GIT_URL` | Optional git clone URL. |
 
