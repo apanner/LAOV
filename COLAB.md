@@ -51,10 +51,15 @@ Inference time is unchanged; split mode mainly saves **disk write time** and **c
 Download **once** on any machine where you have accepted [facebook/sam3](https://huggingface.co/facebook/sam3) access:
 
 ```bash
-pip install -U "huggingface_hub[cli]"
-huggingface-cli login
-huggingface-cli download facebook/sam3 --local-dir ./sam3_snapshot
+cd LAOV
+pip install "huggingface_hub>=0.34"
+hf auth login
+python scripts/download_sam3_for_drive.py
 ```
+
+Windows: `scripts\download_sam3_for_drive.bat`
+
+This writes `VDA_models/facebook/sam3/` (ready to upload). Verify only: `python scripts/download_sam3_for_drive.py --verify-only`.
 
 Upload the **entire** `sam3_snapshot` folder to Drive (must contain `config.json` and weight files):
 
