@@ -34,6 +34,11 @@ from live_action_aov.executors.base import Executor
 from live_action_aov.io.readers.display_transform_reader import DisplayTransformedReader
 from live_action_aov.io.readers.oiio_exr import OIIOExrReader
 from live_action_aov.io.readers.proxy import wrap_if_proxy
+from live_action_aov.io.split_channels import (
+    SPLIT_FOLDER_NAMES,
+    categorize_channels,
+    split_sidecar_pattern,
+)
 from live_action_aov.io.writers.exr import ExrSidecarWriter
 from live_action_aov.shared.optical_flow.cache import FlowCache
 
@@ -301,9 +306,17 @@ class LocalExecutor(Executor):
             # Output dir was resolved at submit() entry so the per-run
             # log could be placed alongside the outputs; reuse it here.
             sidecar_dir.mkdir(parents=True, exist_ok=True)
+            use_split = shot.output_layout == "split_folders"
             sidecar_template = _sidecar_pattern(shot.sequence_pattern)
             attrs_base = _base_attrs(shot, job, artifacts, applied_post)
-            report(0.9, "Writing sidecars…")
+            if use_split:
+                attrs_base[f"{METADATA_NAMESPACE}/output_layout"] = "split_folders"
+            report(
+                0.9,
+                "Writing sidecars (split folders)…"
+                if use_split
+                else "Writing sidecars…",
+            )
 
             # Identify the matte refiner (if any) for the `matte/commercial`
             # shortcut attr. The refiner is whichever pass declared
@@ -337,6 +350,7 @@ class LocalExecutor(Executor):
                     break
 
             first_written: Path | None = None
+            split_roots: dict[str, Path] = {}
             total_frames = max(1, len(per_frame_channels))
             for frame_write_idx, (frame_idx, channels) in enumerate(per_frame_channels.items()):
                 # Cancel checkpoint #2: between sidecar writes. Each
@@ -353,7 +367,6 @@ class LocalExecutor(Executor):
                     )
                 if needs_upscale:
                     channels = _upscale_channels_to_plate(channels, plate_h, plate_w)
-                out_path = sidecar_dir / sidecar_template.format(frame=frame_idx)
                 attrs = dict(attrs_base)
                 attrs[f"{METADATA_NAMESPACE}/frame"] = frame_idx
                 for node in ordered:
@@ -364,11 +377,6 @@ class LocalExecutor(Executor):
                     attrs[f"{METADATA_NAMESPACE}/{node.name}/license"] = lic.spdx
                     attrs[f"{METADATA_NAMESPACE}/{node.name}/commercial"] = lic.commercial_use
                 if matte_refiner_cls is not None:
-                    # `matte/commercial` is a downstream QC shortcut: the
-                    # deliverable is commercial-safe iff the refiner is
-                    # commercial-safe (detector doesn't affect downstream
-                    # usability). Stored as "true"/"false" strings so Nuke's
-                    # metadata TCL reads it as a plain scalar attribute.
                     r_lic = matte_refiner_cls.declared_license()
                     attrs[f"{METADATA_NAMESPACE}/matte/refiner"] = matte_refiner_cls.name
                     attrs[f"{METADATA_NAMESPACE}/matte/commercial"] = (
@@ -376,16 +384,42 @@ class LocalExecutor(Executor):
                     )
                 if matte_detector_cls is not None:
                     attrs[f"{METADATA_NAMESPACE}/matte/detector"] = matte_detector_cls.name
-                writer.write_frame(
-                    out_path,
-                    channels,
-                    attrs=attrs,
-                    pixel_aspect=shot.pixel_aspect,
-                )
-                if first_written is None:
-                    first_written = out_path
 
-            shot.sidecars["utility"] = first_written or sidecar_dir
+                if use_split:
+                    for category, cat_channels in categorize_channels(channels).items():
+                        cat_dir = sidecar_dir / category
+                        cat_dir.mkdir(parents=True, exist_ok=True)
+                        split_roots.setdefault(category, cat_dir)
+                        cat_template = split_sidecar_pattern(
+                            shot.sequence_pattern, category
+                        )
+                        out_path = cat_dir / cat_template.format(frame=frame_idx)
+                        writer.write_frame(
+                            out_path,
+                            cat_channels,
+                            attrs=attrs,
+                            pixel_aspect=shot.pixel_aspect,
+                        )
+                        if first_written is None:
+                            first_written = out_path
+                else:
+                    out_path = sidecar_dir / sidecar_template.format(frame=frame_idx)
+                    writer.write_frame(
+                        out_path,
+                        channels,
+                        attrs=attrs,
+                        pixel_aspect=shot.pixel_aspect,
+                    )
+                    if first_written is None:
+                        first_written = out_path
+
+            if use_split:
+                for cat in SPLIT_FOLDER_NAMES:
+                    if cat in split_roots:
+                        shot.sidecars[cat] = split_roots[cat]
+                shot.sidecars["utility"] = first_written or sidecar_dir
+            else:
+                shot.sidecars["utility"] = first_written or sidecar_dir
             shot.status = "done"
             report(1.0, "Done.")
         except CancelledError:

@@ -9,55 +9,46 @@ This document matches the **LAOV_STANDALONE** flow from `google_desk_app` (`run_
 1. **GPU runtime** (Runtime → Change runtime type → **GPU**).
 2. Mount Drive and load the batch JSON (your Desk-generated notebook cells).
 3. **`git clone`** `LAOV_GIT_URL` (default `https://github.com/apanner/LAOV.git`).
-4. **`pip install -e . --no-deps`** then **`python scripts/colab_setup.py`** to install the full Colab dependency bundle (reuses Colab’s `torch` / `torchvision`, does **not** install **PySide6**, does **not** downgrade numpy).
+4. **`pip install -e . --no-deps`** then **`python scripts/colab_setup.py`** to install the full Colab dependency bundle.
 5. **`python scripts/laov_colab_run.py --job-json ...`** with `LAOV_DRIVE_MOUNT=/content/drive/MyDrive`.
 
-If `colab_setup.py` is missing from the clone, the cell falls back to **`pip install -e ".[matte,dsine]"`**.
+## Output layout (default: split folders)
 
-## Rough download sizes (order-of-magnitude)
+Desk / Colab default is **`output_layout: split_folders`** — separate EXR sequences per AOV type (faster writes and easier Nuke reads than one huge multi-channel utility EXR).
 
-| What | Typical download / disk | Notes |
-|------|---------------------------|--------|
-| **Git clone** | &lt; few MB | Source only. |
-| **`colab_setup.py` pip** (first time) | **~1–4 GB** | `transformers`, `oiio-python`, `opencolorio`, etc.; **no second torch** if Colab GPU stack already works. |
-| **PySide6** (full `.[matte,dsine]` fallback only) | **~0.3–0.8 GB** | Not installed by the `colab_setup` path. |
-| **Hugging Face model cache** (first job) | **~3–15+ GB** | SAM 3 + Depth Anything V2 + tracker weights dominate. |
+```
+MyDrive/{output_folder}/{YYYYMMDD}/LAOV_output/{shot_name}/
+  depth/
+    TB_005_010.depth.1001.exr    # Z, Z_raw, depth.confidence, P.x/y/z
+  normals/
+    TB_005_010.normals.1001.exr  # N.x/y/z, normals.confidence, ao.a
+  flow/
+    TB_005_010.flow.1001.exr     # motion, forward/backward flow channels
+  matte/
+    TB_005_010.matte.1001.exr    # matte.r/g/b/a, mask.<concept>
+  laov_run.log
+```
+
+Set **Output layout → Combined utility EXR** in Desk if you need the legacy single file per frame (`*.utility.*.exr` with all channels).
+
+Inference time is unchanged; split mode mainly saves **disk write time** and **comp load time**.
 
 ## Environment variables
 
 | Variable | Meaning |
 |----------|---------|
-| `LAOV_DRIVE_MOUNT` | Absolute path to the Drive root that contains `VDA_input/...` (Colab: `/content/drive/MyDrive`). |
-| `LAOV_RUNTIME_DATE_FOLDER` | `YYYYMMDD` folder segment under your Desk output path (set by Colab cellcode). |
-| `LAOV_GIT_URL` | Optional override for the `git clone` URL. |
+| `LAOV_DRIVE_MOUNT` | Drive root containing `VDA_input/...` (Colab: `/content/drive/MyDrive`). |
+| `LAOV_RUNTIME_DATE_FOLDER` | `YYYYMMDD` under your output path. |
+| `LAOV_GIT_URL` | Optional git clone URL. |
 
-## Hugging Face (SAM3 / gated weights)
-
-Accept model terms on huggingface.co, then in Colab:
+## Hugging Face (SAM3)
 
 ```python
 !huggingface-cli login
 ```
 
-Use a token with **read** access.
-
-## Optional: persist HF cache on Drive
-
-Reduces repeat downloads when sessions restart, for example:
-
-```python
-import os
-os.environ["HF_HOME"] = "/content/drive/MyDrive/.cache/huggingface"
-```
-
-(Create the folder once on Drive.)
-
 ## Verifying outputs
 
-On any machine with LAOV installed:
-
 ```bash
-liveaov inspect /path/to/plate.1001.utility.exr
+liveaov inspect /path/to/TB_005_010.depth.1001.exr
 ```
-
-Confirm channels and `liveaov/*` metadata.

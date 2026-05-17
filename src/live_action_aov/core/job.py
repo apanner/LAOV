@@ -101,6 +101,10 @@ class Shot(BaseModel):
     # plates. Pixel aspect is preserved. GUI Output tab flips it.
     proxy_long_edge: int | None = None
 
+    # ``combined`` = one multi-channel ``*.utility.*.exr`` per frame (legacy).
+    # ``split_folders`` = ``depth/``, ``normals/``, ``flow/``, ``matte/`` per frame.
+    output_layout: Literal["combined", "split_folders"] = "combined"
+
     status: ShotStatus = "new"
     notes: str = ""
 

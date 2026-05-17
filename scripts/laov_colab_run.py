@@ -205,6 +205,10 @@ def _main_impl() -> int:
     colorspace_s = str(colorspace) if colorspace else "auto"
     proxy_raw = shared.get("proxy_long_edge")
     proxy_long_edge = int(proxy_raw) if proxy_raw is not None else None
+    output_layout = str(shared.get("output_layout", "split_folders")).strip()
+    if output_layout not in ("combined", "split_folders"):
+        _log.warning("Unknown output_layout %r — using split_folders", output_layout)
+        output_layout = "split_folders"
 
     pass_names = _resolve_semantic_passes(
         raw_names,
@@ -274,13 +278,14 @@ def _main_impl() -> int:
             f0, f1 = s0, s1
 
         _log.info(
-            "Shot %s: plate=%s pattern=%s frames=%s-%s output=%s",
+            "Shot %s: plate=%s pattern=%s frames=%s-%s output=%s layout=%s",
             shot_name,
             plate_dir,
             pattern,
             f0,
             f1,
             output_dir,
+            output_layout,
         )
 
         shot = Shot(
@@ -295,6 +300,7 @@ def _main_impl() -> int:
             passes_enabled=pass_names,
             output_dir=output_dir,
             proxy_long_edge=proxy_long_edge,
+            output_layout=output_layout,  # type: ignore[arg-type]
         )
         job = Job(shot=shot, passes=[PassConfig(name=n) for n in pass_names])
         try:
