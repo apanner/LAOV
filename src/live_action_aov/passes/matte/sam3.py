@@ -43,7 +43,9 @@ rectangles without downloading 2 GB of weights.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -61,6 +63,22 @@ from live_action_aov.passes.matte.rank import (
     RankWeights,
     rank_and_assign,
 )
+
+
+def _resolve_model_source(params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """HF hub id or local snapshot path + ``from_pretrained`` kwargs."""
+    raw_path = params.get("model_path") or os.environ.get("LAOV_SAM3_MODEL_PATH")
+    if raw_path:
+        path = Path(str(raw_path)).expanduser().resolve()
+        if path.is_dir():
+            if not (path / "config.json").is_file():
+                raise FileNotFoundError(
+                    f"SAM3 model_path {path} is missing config.json. "
+                    "Upload a full Hugging Face snapshot (see COLAB.md → SAM3 on Drive)."
+                )
+            return str(path), {"local_files_only": True}
+        raise FileNotFoundError(f"SAM3 model_path not found: {path}")
+    return str(params.get("model_id", "facebook/sam3")), {}
 
 
 def _wrap_if_gated_repo(repo: str, exc: BaseException) -> RuntimeError | None:
@@ -148,6 +166,9 @@ class SAM3MattePass(UtilityPass):
 
     DEFAULT_PARAMS: dict[str, Any] = {
         "model_id": "facebook/sam3",
+        # Full HF snapshot directory (e.g. Drive …/VDA_models/facebook/sam3).
+        # When set, loads with local_files_only=True — no Hub download on Colab.
+        "model_path": None,
         "concepts": ["person", "vehicle", "tree", "building", "sky", "water", "animal"],
         "confidence_threshold": 0.4,
         "min_area_fraction": 0.005,  # drop instances smaller than 0.5% of plate
@@ -225,25 +246,21 @@ class SAM3MattePass(UtilityPass):
             Sam3TrackerVideoProcessor,
         )
 
-        repo = str(self.params["model_id"])
+        repo, load_kw = _resolve_model_source(self.params)
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._dtype = torch.float32
 
-        # SAM 3 (and other Meta releases) are gated on the HF Hub. The raw
-        # `OSError: You are trying to access a gated repo.` PyTorch surfaces
-        # is unhelpful — users don't know they need to (a) request access
-        # and (b) `hf auth login` locally. Wrap the four `from_pretrained`
-        # calls and translate gated-repo / 401 errors into actionable
-        # guidance pointing at `docs/install.md`.
+        # Hub path: SAM 3 is gated — wrap 401 / gated-repo errors with setup steps.
+        # Local snapshot (model_path / LAOV_SAM3_MODEL_PATH): no Hub call on Colab.
         try:
-            self._det_processor = Sam3Processor.from_pretrained(repo)
-            det_model = Sam3Model.from_pretrained(repo)
+            self._det_processor = Sam3Processor.from_pretrained(repo, **load_kw)
+            det_model = Sam3Model.from_pretrained(repo, **load_kw)
             det_model.to(self._device).eval()
             self._det_model = det_model
 
-            self._trk_processor = Sam3TrackerVideoProcessor.from_pretrained(repo)
+            self._trk_processor = Sam3TrackerVideoProcessor.from_pretrained(repo, **load_kw)
             trk_dtype = torch.bfloat16 if self._device.type == "cuda" else torch.float32
-            trk_model = Sam3TrackerVideoModel.from_pretrained(repo, dtype=trk_dtype)
+            trk_model = Sam3TrackerVideoModel.from_pretrained(repo, dtype=trk_dtype, **load_kw)
             trk_model.to(self._device).eval()
             self._trk_model = trk_model
             self._trk_dtype = trk_dtype

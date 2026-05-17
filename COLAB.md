@@ -38,16 +38,44 @@ Inference time is unchanged; split mode mainly saves **disk write time** and **c
 | Variable | Meaning |
 |----------|---------|
 | `LAOV_DRIVE_MOUNT` | Drive root containing `VDA_input/...` (Colab: `/content/drive/MyDrive`). |
-
-**Plate path:** batch JSON should use the full Drive-relative folder (e.g. `VDA_input/LOT_test/TB_005_010_1`). If Desk sends only `VDA_input/TB_005_010_1`, `laov_colab_run.py` searches under `VDA_input/` for a matching plate folder (same idea as the LOT desk path fix).
-
-**Pip warnings** after `pip install -e --no-deps` about `pyside6` or `numpy<2` are expected on Colab (GUI deps are not installed; Colab ships numpy 2.x). They do not block the run if `colab_setup.py` reports import OK.
 | `LAOV_RUNTIME_DATE_FOLDER` | `YYYYMMDD` under your output path. |
 | `LAOV_GIT_URL` | Optional git clone URL. |
+| `LAOV_SAM3_MODEL_PATH` | Optional full path to a local SAM3 HF snapshot (see below). |
 
-## Hugging Face (SAM3)
+**Plate path:** batch JSON should use the full Drive-relative folder (e.g. `VDA_input/LOT_test/TB_005_010_1`). If Desk sends only `VDA_input/TB_005_010_1`, `laov_colab_run.py` searches under `VDA_input/` for a matching plate folder.
+
+**Pip warnings** after `pip install -e --no-deps` about `pyside6` or `numpy<2` are expected on Colab. PySide6 is for the desktop GUI only (not installed on Colab). Numpy 2.x on Colab is fine for the headless lane — the warning is package metadata, not a failed install.
+
+## SAM3 on Google Drive (no Colab login)
+
+Download **once** on any machine where you have accepted [facebook/sam3](https://huggingface.co/facebook/sam3) access:
+
+```bash
+pip install -U "huggingface_hub[cli]"
+huggingface-cli login
+huggingface-cli download facebook/sam3 --local-dir ./sam3_snapshot
+```
+
+Upload the **entire** `sam3_snapshot` folder to Drive (must contain `config.json` and weight files):
+
+```text
+MyDrive/VDA_models/facebook/sam3/config.json
+MyDrive/VDA_models/facebook/sam3/model.safetensors
+… (other processor / config files from the snapshot)
+```
+
+Colab auto-detects (first match wins):
+
+- `VDA_models/facebook/sam3`
+- `VDA_model/facebook/sam3`
+- `VDA_models/sam3` or `VDA_model/sam3`
+
+Or set in batch JSON `shared_settings.sam3_model_path` to e.g. `VDA_models/facebook/sam3` (relative to Drive mount).
+
+## Hugging Face login (only if SAM3 is not on Drive)
 
 ```python
+!pip install -q huggingface_hub
 !huggingface-cli login
 ```
 

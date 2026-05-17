@@ -38,6 +38,30 @@ def _drive_mount() -> Path:
     return Path(raw).resolve()
 
 
+def _resolve_sam3_model_dir(mount: Path, shared: dict) -> str | None:
+    """Use a Drive-local HF snapshot so Colab does not download gated SAM3."""
+    explicit = shared.get("sam3_model_path") or os.environ.get("LAOV_SAM3_MODEL_PATH")
+    if explicit:
+        p = Path(str(explicit).strip().replace("\\", "/"))
+        if not p.is_absolute():
+            p = mount / str(p).strip().strip("/")
+        if p.is_dir() and (p / "config.json").is_file():
+            return str(p.resolve())
+        _log.warning("sam3_model_path %s is not a valid HF snapshot; checking defaults", p)
+
+    for rel in (
+        "VDA_models/facebook/sam3",
+        "VDA_model/facebook/sam3",
+        "VDA_models/sam3",
+        "VDA_model/sam3",
+    ):
+        candidate = mount / rel
+        if candidate.is_dir() and (candidate / "config.json").is_file():
+            _log.info("Using Drive SAM3 snapshot: %s", candidate)
+            return str(candidate.resolve())
+    return None
+
+
 _PLATE_SUFFIXES = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".dpx", ".tga")
 
 
@@ -268,6 +292,10 @@ def _main_impl() -> int:
         _log.warning("Unknown output_layout %r — using split_folders", output_layout)
         output_layout = "split_folders"
 
+    sam3_model_dir = _resolve_sam3_model_dir(mount, shared)
+    if sam3_model_dir:
+        os.environ["LAOV_SAM3_MODEL_PATH"] = sam3_model_dir
+
     pass_names = _resolve_semantic_passes(
         raw_names,
         depth_backend=depth_backend,
@@ -360,7 +388,13 @@ def _main_impl() -> int:
             proxy_long_edge=proxy_long_edge,
             output_layout=output_layout,  # type: ignore[arg-type]
         )
-        job = Job(shot=shot, passes=[PassConfig(name=n) for n in pass_names])
+        pass_configs: list[PassConfig] = []
+        for name in pass_names:
+            params: dict = {}
+            if name == matte_detector and sam3_model_dir:
+                params["model_path"] = sam3_model_dir
+            pass_configs.append(PassConfig(name=name, params=params))
+        job = Job(shot=shot, passes=pass_configs)
         try:
             laov_run(job)
         except Exception:
