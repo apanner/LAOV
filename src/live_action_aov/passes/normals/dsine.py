@@ -114,10 +114,13 @@ class DSINEPass(UtilityPass):
         # and cache the repo, (b) adding its path to `sys.path`, and (c)
         # instantiating `DSINE_v02` directly with a minimal args namespace
         # (values mirror `projects/dsine/config.py` defaults).
+        # PyTorch 2.x hub API: positional args are
+        # (github, force_reload, trust_repo, calling_fn, ...).
         repo_dir = torch.hub._get_cache_or_reload(
             "baegwangbin/DSINE",
-            force_reload=False,
-            trust_repo=True,
+            False,
+            True,
+            "DSINE",
             verbose=False,
             skip_validation=True,
         )
