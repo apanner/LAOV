@@ -184,6 +184,9 @@ class SAM3MattePass(UtilityPass):
         },
         "max_heroes": 4,
         "heroes": [],  # user overrides: [{"track_id": 17, "slot": "r"}]
+        # AI Matte / Desk: rectangular prompts on seed frame (normalized 0–1 xywh).
+        "box_prompts": [],
+        "matte_mode": "auto",  # auto | people_fg | bbox | concepts
     }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -277,6 +280,38 @@ class SAM3MattePass(UtilityPass):
     # ------------------------------------------------------------------
     # Detection + tracking — split so tests can override either.
     # ------------------------------------------------------------------
+
+    def _seeds_from_box_prompts(
+        self,
+        seed_frame: np.ndarray,
+        box_prompts: list[dict[str, Any]],
+        plate_h: int,
+        plate_w: int,
+    ) -> list[tuple[int, str, np.ndarray]]:
+        """Build tracker seeds from normalized or pixel xywh boxes."""
+        seeds: list[tuple[int, str, np.ndarray]] = []
+        for idx, box in enumerate(box_prompts, start=1):
+            label = str(box.get("label") or box.get("concept") or f"object_{idx}")
+            norm = box.get("normalized", True)
+            if norm:
+                x = float(box.get("x", 0.0)) * plate_w
+                y = float(box.get("y", 0.0)) * plate_h
+                w = float(box.get("w", 0.1)) * plate_w
+                h = float(box.get("h", 0.1)) * plate_h
+            else:
+                x = float(box.get("x", 0.0))
+                y = float(box.get("y", 0.0))
+                w = float(box.get("w", 100.0))
+                h = float(box.get("h", 100.0))
+            x0 = int(max(0, min(plate_w - 1, round(x))))
+            y0 = int(max(0, min(plate_h - 1, round(y))))
+            x1 = int(max(x0 + 1, min(plate_w, round(x + w))))
+            y1 = int(max(y0 + 1, min(plate_h, round(y + h))))
+            mask = np.zeros((plate_h, plate_w), dtype=np.float32)
+            mask[y0:y1, x0:x1] = 1.0
+            track_id = int(box.get("track_id", idx))
+            seeds.append((track_id, label, mask))
+        return seeds
 
     def _detect_seed(
         self,
@@ -507,8 +542,21 @@ class SAM3MattePass(UtilityPass):
         seed_local = _pick_seed_frame(n_frames, self.params["sample_frame"])
         seed_rgb = frames[seed_local]
 
-        concepts = [str(c) for c in self.params["concepts"]]
-        seeds = self._detect_seed(seed_rgb, concepts)
+        box_prompts = list(self.params.get("box_prompts") or [])
+        matte_mode = str(self.params.get("matte_mode", "auto")).strip().lower()
+        if matte_mode == "people_fg":
+            concepts = ["person"]
+        elif matte_mode == "bbox" and box_prompts:
+            concepts = []
+        elif matte_mode == "concepts":
+            concepts = [str(c) for c in self.params["concepts"]]
+        else:
+            concepts = [str(c) for c in self.params["concepts"]]
+
+        if box_prompts:
+            seeds = self._seeds_from_box_prompts(seed_rgb, box_prompts, plate_h, plate_w)
+        else:
+            seeds = self._detect_seed(seed_rgb, concepts) if concepts else []
 
         # Track each seed across the clip; accumulate _DetectedInstance.
         self._instances = []
@@ -536,7 +584,8 @@ class SAM3MattePass(UtilityPass):
         # Union by concept into per-frame channels.
         per_frame: dict[int, dict[str, np.ndarray]] = {first + i: {} for i in range(n_frames)}
         concepts_found: set[str] = set()
-        for concept in concepts:
+        label_set = concepts if concepts else sorted({inst.label for inst in self._instances})
+        for concept in label_set:
             # OR across all instances of this concept, per frame.
             any_nonzero = False
             for f in range(first, last + 1):
@@ -558,9 +607,16 @@ class SAM3MattePass(UtilityPass):
 
         # Build the light Instance objects and rank them.
         rank_weights = RankWeights(**self.params["ranking"])
+        hero_list = list(self.params.get("heroes") or [])
+        if box_prompts and not hero_list:
+            slots = ("r", "g", "b", "a")
+            for i, box in enumerate(box_prompts[:4]):
+                tid = int(box.get("track_id", i + 1))
+                slot = str(box.get("slot", slots[i]))
+                hero_list.append({"track_id": tid, "slot": slot})
         overrides = [
             HeroOverride(track_id=int(h["track_id"]), slot=h["slot"])
-            for h in (self.params.get("heroes") or [])
+            for h in hero_list
             if "track_id" in h and "slot" in h
         ]
         ranked_input = [

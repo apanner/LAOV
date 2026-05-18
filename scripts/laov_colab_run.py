@@ -62,6 +62,86 @@ def _resolve_sam3_model_dir(mount: Path, shared: dict) -> str | None:
     return None
 
 
+def _resolve_birefnet_model_dir(mount: Path, shared: dict) -> str | None:
+    explicit = shared.get("birefnet_model_path") or os.environ.get(
+        "AI_MATTE_BIREFNET_MODEL_PATH"
+    )
+    if explicit:
+        p = Path(str(explicit).strip().replace("\\", "/"))
+        if not p.is_absolute():
+            p = mount / str(p).strip().strip("/")
+        if p.is_dir() and (p / "config.json").is_file():
+            return str(p.resolve())
+        _log.warning("birefnet_model_path %s invalid; checking defaults", p)
+
+    for rel in (
+        "VDA_models/ZhengPeng7/BiRefNet",
+        "VDA_model/ZhengPeng7/BiRefNet",
+        "VDA_models/birefnet",
+        "VDA_model/birefnet",
+    ):
+        candidate = mount / rel
+        if candidate.is_dir() and (candidate / "config.json").is_file():
+            _log.info("Using Drive BiRefNet snapshot: %s", candidate)
+            return str(candidate.resolve())
+    return None
+
+
+def _matte_pass_params(
+    name: str,
+    shared: dict,
+    seq: dict,
+    *,
+    sam3_model_dir: str | None,
+    birefnet_model_dir: str | None,
+) -> dict:
+    """Merge shared + per-shot matte settings for detector/refiner passes."""
+    params: dict = {}
+    matte = dict(seq.get("matte_config") or {})
+    mode = str(
+        matte.get("matte_mode") or shared.get("matte_mode", "people_fg")
+    ).strip().lower()
+
+    if name == "sam3_matte":
+        if sam3_model_dir:
+            params["model_path"] = sam3_model_dir
+        params["matte_mode"] = mode
+        if matte.get("concepts"):
+            params["concepts"] = list(matte["concepts"])
+        elif shared.get("matte_concepts"):
+            params["concepts"] = list(shared["matte_concepts"])
+        if matte.get("box_prompts"):
+            params["box_prompts"] = list(matte["box_prompts"])
+            params["matte_mode"] = "bbox"
+        if matte.get("heroes"):
+            params["heroes"] = list(matte["heroes"])
+        if matte.get("sample_frame") is not None:
+            params["sample_frame"] = matte["sample_frame"]
+        if matte.get("confidence_threshold") is not None:
+            params["confidence_threshold"] = matte["confidence_threshold"]
+
+    if name == "birefnet_refiner":
+        if birefnet_model_dir:
+            params["model_path"] = birefnet_model_dir
+        for key in (
+            "keyframe_stride",
+            "crop_pad",
+            "inference_size",
+            "hard_mask_dilate",
+        ):
+            val = matte.get(key, shared.get(key))
+            if val is not None:
+                params[key] = val
+
+    if name == "rvm_refiner":
+        for key in ("hard_mask_dilate",):
+            val = matte.get(key, shared.get(key))
+            if val is not None:
+                params[key] = val
+
+    return params
+
+
 _PLATE_SUFFIXES = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".dpx", ".tga")
 
 
@@ -295,6 +375,9 @@ def _main_impl() -> int:
     sam3_model_dir = _resolve_sam3_model_dir(mount, shared)
     if sam3_model_dir:
         os.environ["LAOV_SAM3_MODEL_PATH"] = sam3_model_dir
+    birefnet_model_dir = _resolve_birefnet_model_dir(mount, shared)
+    if birefnet_model_dir:
+        os.environ["AI_MATTE_BIREFNET_MODEL_PATH"] = birefnet_model_dir
 
     pass_names = _resolve_semantic_passes(
         raw_names,
@@ -390,9 +473,13 @@ def _main_impl() -> int:
         )
         pass_configs: list[PassConfig] = []
         for name in pass_names:
-            params: dict = {}
-            if name == matte_detector and sam3_model_dir:
-                params["model_path"] = sam3_model_dir
+            params = _matte_pass_params(
+                name,
+                shared,
+                seq,
+                sam3_model_dir=sam3_model_dir,
+                birefnet_model_dir=birefnet_model_dir,
+            )
             pass_configs.append(PassConfig(name=name, params=params))
         job = Job(shot=shot, passes=pass_configs)
         try:

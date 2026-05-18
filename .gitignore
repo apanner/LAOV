@@ -41,9 +41,14 @@ sessions/
 # Claude Code session state (user-specific)
 .claude/
 
+# Local HF token for download scripts (never commit)
+.hf_token
+scripts/.hf_token
+
 # Model cache (too big for repo)
 *.pt
 *.safetensors
 checkpoints/
 models/*.bin
+VDA_models/
 .tmp_debug/

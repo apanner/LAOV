@@ -135,6 +135,7 @@ dsine              = "live_action_aov.passes.normals.dsine:DSINEPass"
 normalcrafter      = "live_action_aov.passes.normals.normalcrafter:NormalCrafterPass"
 sam3_matte         = "live_action_aov.passes.matte.sam3:SAM3MattePass"
 rvm_refiner        = "live_action_aov.passes.matte.rvm:RVMRefinerPass"
+birefnet_refiner   = "live_action_aov.passes.matte.birefnet:BiRefNetRefinerPass"
 matanyone2         = "live_action_aov.passes.matte.matanyone2:MatAnyone2RefinerPass"
 
 [project.entry-points."live_action_aov.post"]

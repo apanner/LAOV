@@ -77,6 +77,42 @@ Colab auto-detects (first match wins):
 
 Or set in batch JSON `shared_settings.sam3_model_path` to e.g. `VDA_models/facebook/sam3` (relative to Drive mount).
 
+## AI Matte Desk app
+
+Run `google_desk_app/run_app_ai_matte.bat` — per-shot **People / Auto FG / OpenCV bbox**, then **Send to Colab**.
+
+Colab Cell 3 runs the **dedicated** runner (not the generic LAOV batch script):
+
+```bash
+python scripts/ai_matte_colab_run.py --job-json /content/ai_matte_config.json --probe-first-frame
+```
+
+Batch uses `passes_csv: matte`, `refiner: birefnet_refiner`, models from Drive paths below.
+
+**Git:** push LAOV `main` so Colab clone includes `scripts/ai_matte_colab_run.py` and `birefnet_refiner` in `pyproject.toml`. In Desk, set **LAOV repo** to your fork URL if needed.
+
+See `colab_ai/README.md`.
+
+## BiRefNet on Google Drive (no Colab login)
+
+Download **once** (public model, no HF license gate):
+
+```bash
+cd LAOV
+python scripts/download_birefnet_for_drive.py
+```
+
+Windows: `scripts\download_birefnet_for_drive.bat`
+
+Upload to:
+
+```text
+MyDrive/VDA_models/ZhengPeng7/BiRefNet/config.json
+MyDrive/VDA_models/ZhengPeng7/BiRefNet/model.safetensors
+```
+
+Verify: `python scripts/download_birefnet_for_drive.py --verify-only`
+
 ## Hugging Face login (only if SAM3 is not on Drive)
 
 ```python

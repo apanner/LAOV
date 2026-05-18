@@ -91,6 +91,7 @@ PASS_CATALOG: dict[str, list[ModelEntry]] = {
             "SAM-License / MIT",
             True,
             ("sam3_matte", "rvm_refiner"),
+            ("sam3_matte", "birefnet_refiner"),
         ),
         # SAM3 + MatAnyone2 intentionally withheld from the GUI
         # catalog until the MatAnyone2 refiner's `_refine_instance`
