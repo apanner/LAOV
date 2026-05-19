@@ -99,6 +99,7 @@ def _resolve_vitmatte_model_dir(mount: Path, shared: dict) -> str | None:
         if p.is_dir() and (p / "config.json").is_file():
             return str(p.resolve())
     for rel in (
+        "VDA_models/hustvl/vitmatte-base-composition-1k",
         "VDA_models/hustvl/vitmatte-small-composition-1k",
         "VDA_models/vitmatte",
         "VDA_model/vitmatte",
@@ -188,7 +189,17 @@ def _matte_pass_params(
         vit_dir = os.environ.get("AI_MATTE_VITMATTE_MODEL_PATH")
         if vit_dir:
             params["model_path"] = vit_dir
-        for key in ("keyframe_stride", "hard_mask_dilate", "precision"):
+        for key in (
+            "keyframe_stride",
+            "hard_mask_dilate",
+            "trimap_erode_px",
+            "trimap_dilate_px",
+            "trimap_erode_iterations",
+            "trimap_dilate_iterations",
+            "trimap_fg_threshold",
+            "precision",
+            "model_id",
+        ):
             val = matte.get(key, shared.get(key))
             if val is not None:
                 params[key] = val

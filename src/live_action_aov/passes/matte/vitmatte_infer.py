@@ -1,20 +1,77 @@
 # LiveActionAOV — ViTMatte inference (HF transformers).
 
+"""ViTMatte expects a trimap (0=bg, 128=unknown, 255=fg) built from SAM3 hard masks.
+
+We erode the SAM3 mask for definite foreground and dilate for the unknown band —
+same idea as hustvl/Matte-Anything and the ViTMatte README trimap recipes.
+"""
+
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None  # type: ignore
 
-def hard_mask_to_trimap(mask: np.ndarray) -> np.ndarray:
-    """SAM3 hard mask [0,1] → ViTMatte trimap (0=bg, 128=unknown, 255=fg)."""
+
+def sam3_mask_to_trimap(
+    mask: np.ndarray,
+    *,
+    erode_px: int = 10,
+    dilate_px: int = 25,
+    erode_iterations: int = 1,
+    dilate_iterations: int = 1,
+    fg_threshold: float = 0.5,
+) -> np.ndarray:
+    """Build a ViTMatte trimap from a SAM3 hard mask (float or uint8, H×W).
+
+    Morphology (elliptical kernels, Matte-Anything style):
+
+    - **255 (fg):** eroded SAM3 core — definite foreground
+    - **128 (unknown):** dilated ring minus eroded core — where ViTMatte refines edges
+    - **0 (bg):** outside the dilated mask
+
+    ``erode_px`` / ``dilate_px`` are kernel radii in pixels (at plate resolution).
+  """
+    if cv2 is None:
+        raise ImportError("opencv-python-headless required for ViTMatte trimap morphology")
+
     m = np.clip(mask.astype(np.float32), 0.0, 1.0)
-    trimap = np.full(m.shape, 128, dtype=np.uint8)
-    trimap[m < 0.05] = 0
-    trimap[m > 0.85] = 255
+    hard = (m > fg_threshold).astype(np.uint8) * 255
+    h, w = hard.shape[:2]
+    trimap = np.zeros((h, w), dtype=np.uint8)
+
+    if int(hard.sum()) < 1:
+        return trimap
+
+    if dilate_px > 0:
+        k_d = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (dilate_px * 2 + 1, dilate_px * 2 + 1)
+        )
+        dilated = cv2.dilate(hard, k_d, iterations=max(1, dilate_iterations))
+    else:
+        dilated = hard
+
+    if erode_px > 0:
+        k_e = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (erode_px * 2 + 1, erode_px * 2 + 1)
+        )
+        eroded = cv2.erode(hard, k_e, iterations=max(1, erode_iterations))
+    else:
+        eroded = hard
+
+    # Unknown band first, then overwrite core with definite fg (Matte-Anything order).
+    trimap[dilated > 0] = 128
+    trimap[eroded > 0] = 255
     return trimap
+
+
+# Backward-compatible alias
+hard_mask_to_trimap = sam3_mask_to_trimap
 
 
 class ViTMatteSession:
@@ -51,9 +108,8 @@ class ViTMatteSession:
         from transformers import VitMatteForImageMatting, VitMatteImageProcessor
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._processor = VitMatteImageProcessor.from_pretrained(
-            self._model_id, **{k: v for k, v in self._load_kw.items() if k != "trust_remote_code"}
-        )
+        proc_kw = {k: v for k, v in self._load_kw.items() if k != "trust_remote_code"}
+        self._processor = VitMatteImageProcessor.from_pretrained(self._model_id, **proc_kw)
         self._model = VitMatteForImageMatting.from_pretrained(self._model_id, **self._load_kw)
         self._model.eval()
         self._model.to(self._device)
@@ -109,8 +165,6 @@ class ViTMatteSession:
         if instance_mask is not None:
             m = np.clip(instance_mask.astype(np.float32), 0.0, 1.0)
             if m.shape[:2] != (h, w):
-                from PIL import Image as PILImage
-
                 m = (
                     np.array(
                         PILImage.fromarray((m * 255).astype(np.uint8)).resize(
@@ -124,4 +178,4 @@ class ViTMatteSession:
         return alpha
 
 
-__all__ = ["ViTMatteSession", "hard_mask_to_trimap"]
+__all__ = ["ViTMatteSession", "sam3_mask_to_trimap", "hard_mask_to_trimap"]

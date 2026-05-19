@@ -4,9 +4,8 @@
 Requires HF access to https://huggingface.co/facebook/sam3 (accept license once).
 
 Usage:
-  huggingface-cli login
-  python scripts/download_sam3_for_drive.py
-  python scripts/download_sam3_for_drive.py --output D:/VDA_models/facebook/sam3
+  scripts\\download_sam3_for_drive.bat
+  Uses scripts/.hf_token if present (gitignored), else prompts for paste.
 
 Upload the output folder to Drive as:
   MyDrive/VDA_models/facebook/sam3/
@@ -14,11 +13,14 @@ Upload the output folder to Drive as:
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
 import sys
 from pathlib import Path
 
 REPO_ID = "facebook/sam3"
 REQUIRED_FILES = ("config.json",)
+DEFAULT_TOKEN_FILE = Path(__file__).resolve().parent / ".hf_token"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -34,7 +36,25 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only check that --output looks like a complete snapshot.",
     )
+    p.add_argument(
+        "--token-file",
+        type=Path,
+        default=None,
+        help="Optional: read token from a gitignored file instead of prompting.",
+    )
     return p.parse_args()
+
+
+def _read_token_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        token = raw.strip()
+        if token.startswith("#") or not token:
+            continue
+        if token.startswith("hf_"):
+            return token
+    return None
 
 
 def _verify_snapshot(out: Path) -> bool:
@@ -59,12 +79,32 @@ def _verify_snapshot(out: Path) -> bool:
     return ok
 
 
-def _ensure_hf_login() -> None:
-    from huggingface_hub import HfApi
+def _prompt_for_hf_token() -> str:
+    print()
+    print("=" * 60)
+    print("Hugging Face token required (SAM3 is a gated model)")
+    print("=" * 60)
+    print(f"Confirm access: https://huggingface.co/{REPO_ID}")
+    print("Create a Read token: https://huggingface.co/settings/tokens")
+    print()
+    print("Paste your token below. Characters are hidden. Nothing is saved in git.")
+    print("=" * 60)
+    token = getpass.getpass("hf token: ").strip()
+    if not token.startswith("hf_"):
+        print("ERROR: Token should start with hf_", file=sys.stderr)
+        raise SystemExit(1)
+    return token
+
+
+def _ensure_hf_login(*, token_file: Path | None = None) -> None:
+    from huggingface_hub import HfApi, login
     from huggingface_hub.errors import LocalTokenNotFoundError
 
+    # Already logged in from a previous run on this PC?
     try:
-        HfApi().whoami()
+        user = HfApi().whoami()
+        name = user.get("name") or user.get("fullname") or "OK"
+        print(f"Hugging Face: already logged in as {name}")
         return
     except LocalTokenNotFoundError:
         pass
@@ -73,26 +113,33 @@ def _ensure_hf_login() -> None:
         if "401" not in msg and "403" not in msg and "gated" not in msg:
             raise
 
-    print("No Hugging Face token found on this machine.", file=sys.stderr)
-    print("Run ONE of:", file=sys.stderr)
-    print("  hf auth login", file=sys.stderr)
-    print("  huggingface-cli login", file=sys.stderr)
-    print("Or set env HF_TOKEN=hf_...", file=sys.stderr)
-    print(f"Also confirm access: https://huggingface.co/{REPO_ID}", file=sys.stderr)
-    raise SystemExit(1)
+    token = os.environ.get("HF_TOKEN", "").strip() or None
+    if not token and token_file:
+        token = _read_token_file(token_file)
+        if token:
+            print(f"Using token from {token_file}")
+
+    if not token:
+        token = _prompt_for_hf_token()
+
+    login(token=token, add_to_git_credential=False)
+    user = HfApi().whoami()
+    name = user.get("name") or user.get("fullname") or "OK"
+    print(f"Logged in as {name}. Starting download...")
+    print()
 
 
-def _download(out: Path) -> None:
+def _download(out: Path, *, token_file: Path | None = None) -> None:
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
         print('Install: pip install "huggingface_hub>=0.34"', file=sys.stderr)
         raise SystemExit(1) from None
 
-    _ensure_hf_login()
+    _ensure_hf_login(token_file=token_file)
     out.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {REPO_ID} → {out}")
-    print("(This can take several minutes; repo is several GB.)")
+    print("(Several GB — can take 10–30+ minutes depending on connection.)")
     snapshot_download(
         repo_id=REPO_ID,
         local_dir=str(out),
@@ -108,17 +155,19 @@ def main() -> int:
     if args.verify_only:
         return 0 if _verify_snapshot(out) else 1
 
-    _download(out)
+    token_file = args.token_file
+    if token_file is None and DEFAULT_TOKEN_FILE.is_file():
+        token_file = DEFAULT_TOKEN_FILE
+
+    _download(out, token_file=token_file)
     if not _verify_snapshot(out):
-        print("Download completed but verification failed — check HF login and repo access.", file=sys.stderr)
+        print("Download completed but verification failed — check HF access.", file=sys.stderr)
         return 1
 
     print()
     print("Next steps:")
-    print(f"  1. Upload this folder to Google Drive:")
-    print(f"     MyDrive/VDA_models/facebook/sam3/")
-    print(f"  2. Local path to upload: {out}")
-    print("  3. On Colab, re-run Cell 3 — log should show 'Using Drive SAM3 snapshot: ...'")
+    print("  1. Upload to Drive: MyDrive/VDA_models/facebook/sam3/")
+    print(f"  2. Local folder: {out}")
     return 0
 
 

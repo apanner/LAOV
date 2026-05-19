@@ -184,6 +184,29 @@ pip install -q "kornia>=0.7"
 
 or re-run `python scripts/colab_setup.py --full` after `git pull`.
 
+### ViTMatte (high-quality refiner, trimap from SAM3)
+
+Hugging Face only publishes **small** and **base** Composition-1k checkpoints (no separate “large” repo). Use **base** for best quality:
+
+```bash
+cd LAOV
+python scripts/download_vitmatte_for_drive.py --model base
+```
+
+Windows: `scripts\download_vitmatte_for_drive.bat`
+
+Upload to:
+
+```text
+MyDrive/VDA_models/hustvl/vitmatte-base-composition-1k/
+```
+
+Desk / batch JSON: `vitmatte_model_path`: `VDA_models/hustvl/vitmatte-base-composition-1k`
+
+Verify: `python scripts/download_vitmatte_for_drive.py --verify-only`
+
+**SAM3 → trimap (ViTMatte):** on each keyframe, SAM3 hard mask is optionally **expanded** (`hard_mask_dilate`, default 5px), then a classic trimap is built with elliptical **erode** (definite fg = 255) and **dilate** (unknown band = 128, bg = 0). Tunables: `trimap_erode_px` (10), `trimap_dilate_px` (25). Requires OpenCV (`opencv-python-headless` from `colab_setup.py`).
+
 ## SAM3 + transformers on Colab
 
 If SAM3 tracking fails with ``fpn_position_embeddings``, upgrade transformers then re-run Cell 2 setup:

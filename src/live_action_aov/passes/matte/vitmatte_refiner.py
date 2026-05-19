@@ -9,6 +9,11 @@ from typing import Any
 
 import numpy as np
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None  # type: ignore
+
 from live_action_aov.core.pass_base import (
     ChannelSpec,
     License,
@@ -16,7 +21,7 @@ from live_action_aov.core.pass_base import (
     TemporalMode,
     UtilityPass,
 )
-from live_action_aov.passes.matte.vitmatte_infer import ViTMatteSession, hard_mask_to_trimap
+from live_action_aov.passes.matte.vitmatte_infer import ViTMatteSession, sam3_mask_to_trimap
 
 _log = logging.getLogger(__name__)
 
@@ -41,7 +46,7 @@ def _resolve_vitmatte_source(params: dict[str, Any]) -> tuple[str, dict[str, Any
         if path.is_dir() and (path / "config.json").is_file():
             return str(path), {"local_files_only": True}
         raise FileNotFoundError(f"ViTMatte model_path missing config.json: {path}")
-    return str(params.get("model_id", "hustvl/vitmatte-small-composition-1k")), {}
+    return str(params.get("model_id", "hustvl/vitmatte-base-composition-1k")), {}
 
 
 class ViTMatteRefinerPass(UtilityPass):
@@ -68,10 +73,16 @@ class ViTMatteRefinerPass(UtilityPass):
     smoothable_channels: list[str] = []
 
     DEFAULT_PARAMS: dict[str, Any] = {
-        "model_id": "hustvl/vitmatte-small-composition-1k",
+        "model_id": "hustvl/vitmatte-base-composition-1k",
         "model_path": None,
         "keyframe_stride": 4,
-        "hard_mask_dilate": 3,
+        # Pre-dilate SAM3 hard mask before trimap (expands fg seed; separate from trimap dilate).
+        "hard_mask_dilate": 5,
+        "trimap_erode_px": 10,
+        "trimap_dilate_px": 25,
+        "trimap_erode_iterations": 1,
+        "trimap_dilate_iterations": 1,
+        "trimap_fg_threshold": 0.5,
         "precision": "fp16",
     }
 
@@ -91,6 +102,33 @@ class ViTMatteRefinerPass(UtilityPass):
         if heroes:
             self._heroes = list(next(iter(heroes.values())) or [])
 
+    def _dilate_stack(self, hard_stack: np.ndarray) -> np.ndarray:
+        dilate = max(0, int(self.params.get("hard_mask_dilate", 5)))
+        if dilate <= 0 or cv2 is None:
+            return (hard_stack > 0.5).astype(np.float32)
+        import cv2 as _cv2
+
+        kernel = _cv2.getStructuringElement(
+            _cv2.MORPH_ELLIPSE, (dilate * 2 + 1, dilate * 2 + 1)
+        )
+        return np.stack(
+            [
+                _cv2.dilate((hard_stack[t] > 0.5).astype(np.uint8), kernel).astype(np.float32)
+                for t in range(hard_stack.shape[0])
+            ],
+            axis=0,
+        )
+
+    def _trimap_from_hard(self, hard_t: np.ndarray) -> np.ndarray:
+        return sam3_mask_to_trimap(
+            hard_t,
+            erode_px=int(self.params.get("trimap_erode_px", 10)),
+            dilate_px=int(self.params.get("trimap_dilate_px", 25)),
+            erode_iterations=int(self.params.get("trimap_erode_iterations", 1)),
+            dilate_iterations=int(self.params.get("trimap_dilate_iterations", 1)),
+            fg_threshold=float(self.params.get("trimap_fg_threshold", 0.5)),
+        )
+
     def _get_session(self) -> ViTMatteSession:
         if self._session is None:
             repo, load_kw = _resolve_vitmatte_source(self.params)
@@ -107,14 +145,19 @@ class ViTMatteRefinerPass(UtilityPass):
         T, H, W, _ = plate_stack.shape
         session = self._get_session()
         stride = max(1, int(self.params.get("keyframe_stride", 4)))
+        hard_proc = self._dilate_stack(hard_stack)
         key_indices = sorted({t for t in range(T) if t % stride == 0} | {T - 1})
         out = np.zeros((T, H, W), dtype=np.float32)
         for t in key_indices:
-            hard_t = hard_stack[t]
+            hard_t = hard_proc[t]
             if float(hard_t.sum()) < 1.0:
                 continue
-            trimap = hard_mask_to_trimap(hard_t)
-            alpha = session.predict_alpha(plate_stack[t], trimap, instance_mask=hard_t)
+            trimap = self._trimap_from_hard(hard_t)
+            alpha = session.predict_alpha(
+                plate_stack[t],
+                trimap,
+                instance_mask=hard_t,
+            )
             out[t] = alpha
         return out
 
