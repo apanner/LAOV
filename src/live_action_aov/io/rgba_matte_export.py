@@ -42,6 +42,29 @@ def _slug_label(label: str) -> str:
     return s or "hero"
 
 
+def normalize_heroes_metadata(heroes: list[Any]) -> list[dict[str, Any]]:
+    """``HeroSlot`` (SAM3) or ``dict`` (refiners from ``sam3_instances`` artifact)."""
+    out: list[dict[str, Any]] = []
+    for h in heroes:
+        if isinstance(h, dict):
+            out.append(
+                {
+                    "track_id": int(h["track_id"]),
+                    "slot": str(h.get("slot", "")),
+                    "label": str(h.get("label", "")),
+                }
+            )
+        else:
+            out.append(
+                {
+                    "track_id": int(h.track_id),
+                    "slot": str(h.slot),
+                    "label": str(getattr(h, "label", "")),
+                }
+            )
+    return out
+
+
 def combined_matte_pattern(sequence_pattern: str, stage_suffix: str) -> str:
     """``plate.####.exr`` → ``plate_sam3_matte.{frame:04d}.exr``."""
     token = f"_{stage_suffix}."
@@ -227,6 +250,7 @@ __all__ = [
     "RGBA_CHANNELS",
     "build_combined_matte_channels",
     "combined_matte_pattern",
+    "normalize_heroes_metadata",
     "pack_alpha_to_rgba",
     "write_rgba_matte_stage_export",
 ]

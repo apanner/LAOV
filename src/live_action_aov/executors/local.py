@@ -225,15 +225,12 @@ class LocalExecutor(Executor):
                     from live_action_aov.io.stage_export import write_pass_stage_export
 
                     heroes_meta: list[dict] = []
-                    if hasattr(instance, "_heroes"):
-                        for h in instance._heroes:
-                            heroes_meta.append(
-                                {
-                                    "track_id": int(h.track_id),
-                                    "slot": str(h.slot),
-                                    "label": str(getattr(h, "label", "")),
-                                }
-                            )
+                    if hasattr(instance, "_heroes") and instance._heroes:
+                        from live_action_aov.io.rgba_matte_export import (
+                            normalize_heroes_metadata,
+                        )
+
+                        heroes_meta = normalize_heroes_metadata(list(instance._heroes))
                     write_pass_stage_export(
                         pass_name=node.name,
                         export_subdir=export_subdir,

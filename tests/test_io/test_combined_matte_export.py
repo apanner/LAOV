@@ -10,8 +10,27 @@ import pytest
 from live_action_aov.io.rgba_matte_export import (
     build_combined_matte_channels,
     combined_matte_pattern,
+    normalize_heroes_metadata,
     write_rgba_matte_stage_export,
 )
+
+
+def test_normalize_heroes_metadata_dict_and_slot() -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeHero:
+        track_id: int
+        slot: str
+        label: str
+
+    meta = normalize_heroes_metadata(
+        [
+            {"track_id": 2, "slot": "r", "label": "person"},
+            FakeHero(5, "g", "car"),
+        ]
+    )
+    assert meta[0]["track_id"] == 2 and meta[1]["label"] == "car"
 
 
 def test_combined_matte_pattern() -> None:
