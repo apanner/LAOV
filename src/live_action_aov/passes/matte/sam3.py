@@ -42,6 +42,7 @@ rectangles without downloading 2 GB of weights.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -63,6 +64,8 @@ from live_action_aov.passes.matte.rank import (
     RankWeights,
     rank_and_assign,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _resolve_model_source(params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -563,8 +566,10 @@ class SAM3MattePass(UtilityPass):
     ) -> dict[int, dict[str, np.ndarray]]:
         first, last = frame_range
         n_frames = last - first + 1
+        _log.info("SAM3: reading %d plate frames (%s-%s)…", n_frames, first, last)
         frames = np.stack([reader.read_frame(f)[0] for f in range(first, last + 1)], axis=0)
         plate_h, plate_w = int(frames.shape[1]), int(frames.shape[2])
+        _log.info("SAM3: plate stack %s — detect & track", frames.shape)
         self._plate_shape = (plate_h, plate_w)
 
         seed_local = _pick_seed_frame(n_frames, self.params["sample_frame"])
@@ -588,7 +593,9 @@ class SAM3MattePass(UtilityPass):
 
         # Track each seed across the clip; accumulate _DetectedInstance.
         self._instances = []
+        _log.info("SAM3: tracking %d instance(s) across %d frames", len(seeds), n_frames)
         for track_id, label, seed_mask in seeds:
+            _log.info("SAM3: track %s (%s) — video propagate…", track_id, label)
             if seed_mask.shape != (plate_h, plate_w):
                 raise ValueError(
                     f"Seed mask for track {track_id} has shape {seed_mask.shape}, "

@@ -17,13 +17,21 @@ of truth (design §2, principle 5).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 __version__ = "0.1.0"
 
 from live_action_aov.core.cancel import CancelledError, CancelToken
 from live_action_aov.core.job import Job, PassConfig, Shot, Task
 
+ProgressCallback = Callable[[float, str], None]
 
-def run(job: Job, cancel: CancelToken | None = None) -> Job:
+
+def run(
+    job: Job,
+    cancel: CancelToken | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> Job:
     """Execute a Job with the default (local) executor.
 
     Returns the updated Job (status + sidecar paths filled in).
@@ -33,11 +41,18 @@ def run(job: Job, cancel: CancelToken | None = None) -> Job:
     `CancelledError` at the next safe checkpoint instead of running
     to completion. Default `None` keeps the historic non-cancellable
     behaviour.
+
+    `progress_callback(fraction, label)` receives milestones in ``[0, 1]``
+    (pass boundaries, write phase). Colab runners use this for stage updates.
     """
     # Lazy import so `import live_action_aov` stays light.
     from live_action_aov.executors.local import LocalExecutor
 
-    return LocalExecutor().submit(job, cancel=cancel)
+    return LocalExecutor().submit(
+        job,
+        cancel=cancel,
+        progress_callback=progress_callback,
+    )
 
 
 __all__ = [

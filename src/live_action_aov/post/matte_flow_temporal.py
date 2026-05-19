@@ -15,9 +15,12 @@ Designed for the AI Matte lane: ``passes_csv: flow,matte`` + this post step.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 from live_action_aov.io.channels import MATTE_CHANNELS
 from live_action_aov.post.temporal_smooth import (
@@ -64,6 +67,13 @@ class MatteFlowTemporal:
         if len(frames) < 2:
             return per_frame_channels
 
+        _log.info(
+            "matte_flow_temporal: propagating %d frames (%s-%s), stride=%s",
+            len(frames),
+            frames[0],
+            frames[-1],
+            self.params.get("keyframe_stride", 4),
+        )
         stride = max(1, int(self.params.get("keyframe_stride", 4)))
         threshold = float(self.params["fb_threshold_px"])
         blend_fb = float(self.params.get("blend_forward_backward", 0.5))

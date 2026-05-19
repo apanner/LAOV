@@ -33,9 +33,12 @@ Implementation notes (spec §11.3 traps):
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 from live_action_aov.core.pass_base import (
     ChannelSpec,
@@ -265,6 +268,9 @@ class RAFTPass(UtilityPass):
         frame_range: tuple[int, int],
     ) -> dict[int, dict[str, np.ndarray]]:
         first, last = frame_range
+        n_pairs = max(0, last - first)
+        _log.info("RAFT: optical flow for %d frame pairs (%s-%s)…", n_pairs, first, last)
+        log_step = max(1, n_pairs // 20) if n_pairs else 1
         # Run RAFT on every consecutive pair. For pair (f, f+1) we get both
         # fwd (f → f+1) and bwd (f+1 → f). We store fwd at frame f and bwd
         # at frame f+1 so each frame's channels are semantically correct.
@@ -274,7 +280,9 @@ class RAFTPass(UtilityPass):
 
         plate_h: int | None = None
         plate_w: int | None = None
-        for f in range(first, last):
+        for pair_i, f in enumerate(range(first, last)):
+            if pair_i == 0 or pair_i == n_pairs - 1 or (pair_i % log_step) == 0:
+                _log.info("RAFT: pair %d/%d (frames %s→%s)", pair_i + 1, n_pairs, f, f + 1)
             frame_a, _ = reader.read_frame(f)
             frame_b, _ = reader.read_frame(f + 1)
             pair = np.stack([frame_a, frame_b], axis=0)

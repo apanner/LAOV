@@ -867,7 +867,12 @@ def _format_plate_hint(mount: Path, rel_plate: str, seq: dict | None = None) -> 
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    try:
+        from colab_run_status import configure_flushed_logging
+
+        configure_flushed_logging()
+    except ImportError:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         return _main_impl()
     except Exception:
@@ -958,11 +963,25 @@ def _main_impl() -> int:
     out_folder_path = str(shared.get("output_folder_path", "VDA_output")).strip("/")
     date_folder = str(os.environ.get("LAOV_RUNTIME_DATE_FOLDER", "")).strip().strip("/")
 
+    status = None
+    try:
+        from colab_run_status import reporter_from_job_json
+
+        status = reporter_from_job_json(mount, cfg)
+        if status:
+            status.begin_run("LAOV batch — resolving passes")
+            _log.info("Status file: %s", status.status_path_hint())
+    except ImportError:
+        pass
+
     any_failed = False
-    for seq in sequences:
+    shot_total = len(sequences)
+    for shot_idx, seq in enumerate(sequences):
         rel_plate = str(seq.get("plate_folder_drive_relative", "")).strip().strip("/").replace("\\", "/")
         rel_side = str(seq.get("sidecar_output_drive_subpath", "")).strip().strip("/").replace("\\", "/")
         shot_name = str(seq.get("shot_name", "shot"))
+        if status:
+            status.shot_begin(shot_name, shot_idx + 1, shot_total)
         if not rel_plate:
             _log.error("Sequence missing plate_folder_drive_relative")
             return 1
@@ -1022,24 +1041,39 @@ def _main_impl() -> int:
             )
             pass_configs.append(PassConfig(name=name, params=params))
         job = Job(shot=shot, passes=pass_configs)
+        progress_cb = (
+            status.make_laov_callback(shot_name, shot_idx, shot_total) if status else None
+        )
         try:
-            laov_run(job)
+            if status:
+                status.stage(f"{shot_name}: engine — passes {passes_csv}", shot_name=shot_name)
+            laov_run(job, progress_callback=progress_cb)
         except Exception:
             _log.error("LAOV run failed for shot %s:\n%s", shot_name, traceback.format_exc())
+            if status:
+                status.shot_end(shot_name, ok=False, message="engine error")
             any_failed = True
             continue
 
         if shot.status != "done":
             _log.error("Shot %s finished with status=%s (expected done)", shot_name, shot.status)
+            if status:
+                status.shot_end(shot_name, ok=False, message=str(shot.status))
             any_failed = True
         else:
             _log.info("Done shot=%s status=%s", shot_name, shot.status)
+            if status:
+                status.shot_end(shot_name, ok=True)
 
     if any_failed:
         _log.error("One or more shots failed.")
+        if status:
+            status.finish_run(ok=False)
         return 1
 
     _log.info("All sequences complete.")
+    if status:
+        status.finish_run(ok=True)
     return 0
 
 

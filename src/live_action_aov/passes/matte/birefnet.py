@@ -17,6 +17,7 @@ only keyframes carry alpha; ``matte_flow_temporal`` post fills the shot using RA
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,8 @@ from live_action_aov.io.channels import (
     CH_MATTE_R,
 )
 from live_action_aov.passes.matte.birefnet_infer import BiRefNetSession
+
+_log = logging.getLogger(__name__)
 
 _SLOT_TO_CHANNEL: dict[str, str] = {
     "r": CH_MATTE_R,
@@ -209,8 +212,18 @@ class BiRefNetRefinerPass(UtilityPass):
             {t for t in range(T) if t % stride == 0} | {T - 1}
         )
         refined_keys: dict[int, np.ndarray] = {}
+        n_keys = len(key_indices)
+        log_step = max(1, n_keys // 10)
 
-        for t in key_indices:
+        for ki, t in enumerate(key_indices):
+            if ki == 0 or ki == n_keys - 1 or (ki % log_step) == 0:
+                _log.info(
+                    "BiRefNet: keyframe %d/%d (local frame %d / %d)",
+                    ki + 1,
+                    n_keys,
+                    t,
+                    T,
+                )
             hard_t = hard_proc[t]
             if float(hard_t.sum()) < 1.0:
                 refined_keys[t] = np.zeros((H, W), dtype=np.float32)
@@ -259,6 +272,7 @@ class BiRefNetRefinerPass(UtilityPass):
     ) -> dict[int, dict[str, np.ndarray]]:
         first, last = frame_range
         n_frames = last - first + 1
+        _log.info("BiRefNet: reading %d plate frames (%s-%s)…", n_frames, first, last)
         # Plate sequence: same OIIO path as SAM3 (EXR/JPG, display transform, proxy).
         frames = np.stack(
             [reader.read_frame(f)[0] for f in range(first, last + 1)], axis=0
@@ -273,6 +287,7 @@ class BiRefNetRefinerPass(UtilityPass):
             for ch in _SLOT_TO_CHANNEL.values()
         }
         self._refined = []
+        _log.info("BiRefNet: refining %d hero matte(s)", len(self._heroes))
         for hero in self._heroes:
             slot = str(hero.get("slot", ""))
             channel = _SLOT_TO_CHANNEL.get(slot)
@@ -288,6 +303,7 @@ class BiRefNetRefinerPass(UtilityPass):
             hard_stack = np.asarray(stack, dtype=np.float32)
             if hard_stack.shape[0] != n_frames:
                 continue
+            _log.info("BiRefNet: hero track_id=%s slot=%s", track_id, slot)
             soft = self._refine_instance(frames, hard_stack)
             channel_stacks[channel] = soft
             self._refined.append(

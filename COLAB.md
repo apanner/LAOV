@@ -77,6 +77,18 @@ Colab auto-detects (first match wins):
 
 Or set in batch JSON `shared_settings.sam3_model_path` to e.g. `VDA_models/facebook/sam3` (relative to Drive mount).
 
+## Progress / stage updates (Colab)
+
+During a run you should see flushed **`[STAGE]`** lines in the notebook (pass boundaries, shot preflight, percent). LAOV also writes:
+
+```text
+MyDrive/VDA_Jobs/status/{job_id}_status.json
+```
+
+Open that JSON on Drive (or re-enable Desk job monitoring) to see `stage`, `progress_percent`, and per-shot `sequences[].status` while a long SAM3 / BiRefNet job is running. Inside each pass, logs include sub-stages (e.g. `SAM3: track …`, `BiRefNet: keyframe 12/101`, `RAFT: pair 200/399`).
+
+After `git pull`, re-run Cell 3 (setup cell optional if deps unchanged).
+
 ## AI Matte Desk app
 
 Run `google_desk_app/run_app_ai_matte.bat` — per-shot **People / Auto FG / OpenCV bbox**, then **Send to Colab**.
@@ -114,14 +126,6 @@ MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_0
 **Git:** push LAOV `main` so Colab clone includes `scripts/ai_matte_colab_run.py`, nested plate search in `laov_colab_run.py`, and `birefnet_refiner` in `pyproject.toml`. In Desk, set **LAOV repo** to your fork URL if needed.
 
 See `colab_ai/README.md`.
-
-### Live progress (Colab + Desk)
-
-While `ai_matte_colab_run.py` runs, it prints flushed **`[AI_MATTE]`** lines (stage + percent) and updates:
-
-`MyDrive/VDA_Jobs/status/{job_id}_status.json`
-
-Fields include `current_stage`, `progress_percent`, `current_shot`, and per-shot `sequences[].status` (`pending` → `running` → `success` / `failed`). Refresh that file in Drive or enable Desk job monitoring to see progress during long SAM3 / BiRefNet passes.
 
 ## BiRefNet on Google Drive (no Colab login)
 
