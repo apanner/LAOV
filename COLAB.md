@@ -108,15 +108,41 @@ Default Desk layout (`output_folder_path` is usually `VDA_output`, date from Col
 
 ```text
 MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
-  matte/           # hero mattes — matte.r, matte.g, matte.b, matte.a per frame
-  flow/            # RAFT motion sidecars (when flow pass is enabled)
+  matte/           # EXR sidecars (see below)
+  flow/            # RAFT motion — NOT a matte (used to fill between BiRefNet keyframes)
+  qc/              # QC MP4 previews (after run, if qc_mp4 is true)
   laov_run.log
 ```
 
-Example:
+**What is what**
+
+| Output | What it is |
+|--------|------------|
+| **`flow/`** | Optical flow (motion vectors). Intermediate data for `matte_flow_temporal` — not for comp mattes. |
+| **`matte/*.matte.<frame>.exr`** | Multi-channel EXR per frame. |
+| → `mask.<concept>` | **SAM3** — hard union masks per concept (e.g. `mask.person`). |
+| → `matte.r/g/b/a` | **BiRefNet** soft hero mattes, then **temporal post** fills every frame using `flow/`. |
+| **`qc/*_sam3_matte_qc.mp4`** | Preview of SAM3 `mask.*` (green on plate). |
+| **`qc/*_final_matte_qc.mp4`** | Preview of final `matte.*` (BiRefNet + temporal). |
+
+**Pipeline (yes — BiRefNet uses SAM3)**
+
+```text
+Plate → RAFT (flow/) → SAM3 track (mask.*) → BiRefNet refine (matte.r/g/b/a on keyframes)
+      → matte_flow_temporal (warp/fill using flow/) → write matte/ EXRs → qc/ MP4s
+```
+
+Example EXR:
 
 ```text
 MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_020_plate_v001.matte.1001.exr
+```
+
+Example QC MP4:
+
+```text
+.../TB_073_020_plate_v001/qc/TB_073_020_plate_v001_sam3_matte_qc.mp4
+.../TB_073_020_plate_v001/qc/TB_073_020_plate_v001_final_matte_qc.mp4
 ```
 
 `shot_name` comes from the sequence / folder leaf in the batch JSON. EXR plates may live in a **subfolder** (e.g. `.../TB_073_020_plate_v001/exr/`); `ai_matte_colab_run.py` searches nested folders under the JSON path and under `VDA_input/` when the exact path is missing.

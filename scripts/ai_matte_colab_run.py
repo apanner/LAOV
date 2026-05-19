@@ -369,6 +369,22 @@ def _run_sequences(
             _log.info("Done shot=%s", shot_name)
             if status:
                 status.shot_end(shot_name, ok=True)
+            if output_dir and bool(shared.get("qc_mp4", True)):
+                try:
+                    if status:
+                        status.stage(f"{shot_name}: QC MP4 export", shot_name=shot_name)
+                    from ai_matte_qc_mp4 import export_ai_matte_qc_mp4s
+
+                    fps = float(shared.get("fps") or shared.get("frame_rate") or 24.0)
+                    export_ai_matte_qc_mp4s(
+                        output_dir,
+                        plate_dir=plate_dir,
+                        sequence_pattern=pattern,
+                        frame_range=(f0, f1),
+                        fps=fps,
+                    )
+                except Exception as exc:
+                    _log.warning("QC MP4 export failed for %s: %s", shot_name, exc)
 
     if any_failed:
         if status:
