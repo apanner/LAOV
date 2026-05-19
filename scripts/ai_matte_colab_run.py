@@ -92,7 +92,7 @@ def _refiners_from_exports(shared: dict) -> list[str]:
     names: list[str] = []
     if bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner":
         names.append("birefnet_refiner")
-    if bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner":
+    if bool(shared.get("export_vitmatte_exr", True)) or refiner == "vitmatte_refiner":
         names.append("vitmatte_refiner")
     if refiner == "rvm_refiner":
         names.append("rvm_refiner")
@@ -160,7 +160,7 @@ def _stage_export_map(shared: dict, *, phase: str) -> dict[str, str]:
             exports["sam3_matte"] = "matte_sam3"
         if shared.get("export_birefnet_exr", True):
             exports["birefnet_refiner"] = "matte_birefnet"
-        if shared.get("export_vitmatte_exr", False):
+        if shared.get("export_vitmatte_exr", True):
             exports["vitmatte_refiner"] = "matte_vitmatte"
     elif phase == "sam3" and shared.get("export_sam3_exr", True):
         exports["sam3_matte"] = "matte_sam3"
