@@ -155,6 +155,17 @@ class LocalExecutor(Executor):
         # Shared state published between passes and post-processors.
         artifacts: dict[str, dict[int, Any]] = {}
         flow_cache = FlowCache()
+        if shot.preload_sam3_artifacts_dir is not None:
+            from live_action_aov.io.sam3_artifact_io import load_sam3_artifacts
+
+            loaded = load_sam3_artifacts(shot.preload_sam3_artifacts_dir)
+            if loaded is None:
+                raise FileNotFoundError(
+                    f"SAM3 artifacts not found under {shot.preload_sam3_artifacts_dir}. "
+                    "Run the SAM3 Colab phase first."
+                )
+            for art_name, per_frame in loaded.items():
+                artifacts.setdefault(art_name, {}).update(per_frame)
 
         try:
             shot.status = "running"
@@ -218,6 +229,15 @@ class LocalExecutor(Executor):
                         shot_name=shot.name,
                         pixel_aspect=shot.pixel_aspect,
                     )
+                    if node.name == "sam3_matte" and artifacts.get("sam3_hard_masks"):
+                        from live_action_aov.io.sam3_artifact_io import save_sam3_artifacts
+
+                        save_sam3_artifacts(
+                            sidecar_dir / export_subdir,
+                            artifacts,
+                            frame_range=shot.frame_range,
+                            shot_name=shot.name,
+                        )
 
             # --- Auto-wire TemporalSmoother for PER_FRAME passes with
             # `smooth: auto` (spec §13.1 Phase 2). Only runs when a flow pass

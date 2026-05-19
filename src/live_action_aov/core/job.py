@@ -113,6 +113,9 @@ class Shot(BaseModel):
     # ``pass_export_subdirs`` stage snapshots only (Desk "stage EXR" checkboxes).
     write_final_sidecars: bool = True
 
+    # AI Matte refine phase: load ``matte_sam3/_sam3_artifacts.npz`` before refiners run.
+    preload_sam3_artifacts_dir: Path | None = None
+
     status: ShotStatus = "new"
     notes: str = ""
 
@@ -125,6 +128,13 @@ class Shot(BaseModel):
     @field_validator("folder", mode="before")
     @classmethod
     def _coerce_folder(cls, v: Any) -> Path:
+        return Path(v) if not isinstance(v, Path) else v
+
+    @field_validator("preload_sam3_artifacts_dir", mode="before")
+    @classmethod
+    def _coerce_preload_sam3(cls, v: Any) -> Path | None:
+        if v is None or v == "":
+            return None
         return Path(v) if not isinstance(v, Path) else v
 
     @field_validator("output_dir", mode="before")

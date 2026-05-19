@@ -225,6 +225,18 @@ LAOV also applies a runtime alias patch in ``sam3_matte`` for older Colab caches
 !huggingface-cli login
 ```
 
+## Phased Colab runs (recommended)
+
+Do **not** run SAM3 + BiRefNet + ViTMatte in one Colab job. Use Desk **Colab phase**:
+
+1. **SAM3 only** — writes `matte_sam3/` EXRs + `_sam3_artifacts.npz` (for refine).
+2. **Refine** — loads artifacts, runs **one** refiner (BiRefNet or ViTMatte) → `matte_birefnet/` or `matte_vitmatte/`.
+3. **Temporal** (optional) — RAFT + fill → `matte/` full sequence.
+
+Same output folder and **same** `LAOV_RUNTIME_DATE_FOLDER` for phase 1 and 2 (re-submit from Desk or reuse config path).
+
+CLI override: `python scripts/ai_matte_colab_run.py --job-json ... --phase sam3|refine|temporal`
+
 ## Colab notebook: `CODE_FILE_ID` must be AI Matte cellcode
 
 If Cell 1 fails with `ImportError: cannot import name 'setup_ai_matte_cell1'`, the notebook is downloading **VDA/DVD** cellcode, not AI Matte.

@@ -53,6 +53,7 @@ AI_MATTE_DEFAULTS = {
     "export_final_exr": False,
     "export_flow_exr": False,
     "run_matte_flow_temporal": False,
+    "matte_pipeline_phase": "sam3",
     "qc_mp4": True,
 }
 
@@ -69,12 +70,45 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Log shape/min/max of first plate frame per shot (OIIO read check).",
     )
+    p.add_argument(
+        "--phase",
+        choices=("sam3", "refine", "temporal", "all"),
+        default=None,
+        help="Pipeline phase (overrides batch JSON matte_pipeline_phase).",
+    )
     return p.parse_args()
 
 
-def _build_ai_matte_pass_names(shared: dict) -> list[str]:
-    """Expand flow + SAM3 + optional refiner passes for stage exports."""
+def _pipeline_phase(shared: dict, cli_phase: str | None) -> str:
+    phase = str(cli_phase or shared.get("matte_pipeline_phase", "sam3")).strip().lower()
+    if phase not in ("sam3", "refine", "temporal", "all"):
+        return "sam3"
+    return phase
+
+
+def _build_ai_matte_pass_names(shared: dict, *, phase: str) -> list[str]:
+    """Schedule passes for one Colab phase (not everything at once)."""
     refiner = str(shared.get("refiner", "birefnet_refiner"))
+
+    if phase == "sam3":
+        return ["sam3_matte"]
+
+    if phase == "refine":
+        names: list[str] = []
+        if refiner == "birefnet_refiner":
+            names.append("birefnet_refiner")
+        elif refiner == "vitmatte_refiner":
+            names.append("vitmatte_refiner")
+        elif refiner == "rvm_refiner":
+            names.append("rvm_refiner")
+        else:
+            names.append(refiner)
+        return names
+
+    if phase == "temporal":
+        return ["flow"]
+
+    # all — legacy single job (not recommended on Colab)
     names = ["sam3_matte"]
     need_flow = bool(shared.get("export_flow_exr", False))
     if bool(shared.get("run_matte_flow_temporal", False)) and bool(
@@ -85,25 +119,36 @@ def _build_ai_matte_pass_names(shared: dict) -> list[str]:
         need_flow = bool(shared.get("export_flow_exr", False))
     if need_flow:
         names.insert(0, "flow")
-    run_birefnet = bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner"
-    run_vitmatte = bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner"
-    if run_birefnet and "birefnet_refiner" not in names:
-        names.append("birefnet_refiner")
-    if run_vitmatte and "vitmatte_refiner" not in names:
-        names.append("vitmatte_refiner")
+    if bool(shared.get("export_birefnet_exr", False)) or refiner == "birefnet_refiner":
+        if "birefnet_refiner" not in names:
+            names.append("birefnet_refiner")
+    if bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner":
+        if "vitmatte_refiner" not in names:
+            names.append("vitmatte_refiner")
     if refiner == "rvm_refiner" and "rvm_refiner" not in names:
         names.append("rvm_refiner")
     return names
 
 
-def _stage_export_map(shared: dict) -> dict[str, str]:
+def _stage_export_map(shared: dict, *, phase: str) -> dict[str, str]:
     exports: dict[str, str] = {}
-    if shared.get("export_sam3_exr", True):
+    if phase == "sam3" and shared.get("export_sam3_exr", True):
         exports["sam3_matte"] = "matte_sam3"
-    if shared.get("export_birefnet_exr", True):
-        exports["birefnet_refiner"] = "matte_birefnet"
-    if shared.get("export_vitmatte_exr", True):
-        exports["vitmatte_refiner"] = "matte_vitmatte"
+    elif phase == "refine":
+        refiner = str(shared.get("refiner", "birefnet_refiner"))
+        if refiner == "birefnet_refiner" and shared.get("export_birefnet_exr", True):
+            exports["birefnet_refiner"] = "matte_birefnet"
+        elif refiner == "vitmatte_refiner" and shared.get("export_vitmatte_exr", True):
+            exports["vitmatte_refiner"] = "matte_vitmatte"
+        elif refiner == "rvm_refiner":
+            exports["rvm_refiner"] = "matte"
+    elif phase == "all":
+        if shared.get("export_sam3_exr", True):
+            exports["sam3_matte"] = "matte_sam3"
+        if shared.get("export_birefnet_exr", True):
+            exports["birefnet_refiner"] = "matte_birefnet"
+        if shared.get("export_vitmatte_exr", True):
+            exports["vitmatte_refiner"] = "matte_vitmatte"
     return exports
 
 
@@ -221,6 +266,8 @@ def main() -> int:
         cfg = json.load(f)
 
     shared = _merge_shared_defaults(cfg.get("shared_settings") or {})
+    phase = _pipeline_phase(shared, args.phase)
+    shared["matte_pipeline_phase"] = phase
     cfg["shared_settings"] = shared
     model_type = str(shared.get("model_type", ""))
     if model_type and model_type != "AI_MATTE_STANDALONE":
@@ -228,9 +275,14 @@ def main() -> int:
 
     matte_detector = str(shared.get("matte_detector", "sam3_matte"))
     refiner = str(shared.get("refiner", "birefnet_refiner"))
-    _log.info("AI Matte batch — detector=%s refiner=%s passes=%s", matte_detector, refiner, shared.get("passes_csv"))
+    _log.info(
+        "AI Matte batch — phase=%s detector=%s refiner=%s",
+        phase,
+        matte_detector,
+        refiner,
+    )
 
-    pass_names_preview = _build_ai_matte_pass_names(shared)
+    pass_names_preview = _build_ai_matte_pass_names(shared, phase=phase)
 
     if "birefnet_refiner" in pass_names_preview:
         try:
@@ -267,11 +319,25 @@ def main() -> int:
     if birefnet_model_dir:
         os.environ["AI_MATTE_BIREFNET_MODEL_PATH"] = birefnet_model_dir
         _log.info("BiRefNet model: %s", birefnet_model_dir)
-    elif refiner == "birefnet_refiner":
+    elif "birefnet_refiner" in pass_names_preview and not birefnet_model_dir:
         _log.error(
             "BiRefNet snapshot not found on Drive. Upload MyDrive/VDA_models/ZhengPeng7/BiRefNet/"
         )
         return 1
+
+    if "vitmatte_refiner" in pass_names_preview:
+        vit_dir = lcr._resolve_vitmatte_model_dir(mount, shared)
+        if vit_dir:
+            os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vit_dir
+            _log.info("ViTMatte model: %s", vit_dir)
+        elif phase in ("refine", "all"):
+            _log.error(
+                "ViTMatte snapshot not found. Upload MyDrive/VDA_models/hustvl/vitmatte-base-composition-1k/"
+            )
+            return 1
+
+    if phase == "sam3" and not sam3_model_dir:
+        _log.warning("SAM3 phase: no local snapshot — Hub download may require HF login")
 
     sequences = cfg.get("sequences") or []
     if not sequences:
@@ -284,6 +350,7 @@ def main() -> int:
             mount,
             shared,
             sequences,
+            phase=phase,
             matte_detector=matte_detector,
             refiner=refiner,
             probe_first_frame=args.probe_first_frame,
@@ -316,8 +383,9 @@ def _run_sequences(
     proxy_long_edge = int(proxy_raw) if proxy_raw is not None else None
     output_layout = str(shared.get("output_layout", "split_folders"))
 
-    pass_names = _build_ai_matte_pass_names(shared)
-    stage_exports = _stage_export_map(shared)
+    pass_names = _build_ai_matte_pass_names(shared, phase=phase)
+    stage_exports = _stage_export_map(shared, phase=phase)
+    _log.info("Phase %s — passes: %s", phase, ", ".join(pass_names))
     registry = get_registry()
     for name in pass_names:
         lic = registry.get_pass(name).declared_license()
@@ -376,6 +444,24 @@ def _run_sequences(
         if probe_first_frame:
             _probe_plate_read(plate_dir, pattern, f0)
 
+        preload_sam3_dir = None
+        if phase == "refine" and output_dir is not None:
+            from live_action_aov.io.sam3_artifact_io import sam3_artifact_path
+
+            sam3_stage = (output_dir / "matte_sam3").resolve()
+            if not sam3_artifact_path(sam3_stage).is_file():
+                _log.error(
+                    "%s: missing %s — run Colab with matte_pipeline_phase=sam3 first",
+                    shot_name,
+                    sam3_artifact_path(sam3_stage),
+                )
+                any_failed = True
+                if status:
+                    status.shot_end(shot_name, ok=False, message="SAM3 artifacts missing")
+                continue
+            preload_sam3_dir = sam3_stage
+
+        write_final = bool(shared.get("export_final_exr", False)) or phase == "temporal"
         shot = Shot(
             name=shot_name,
             folder=plate_dir,
@@ -390,6 +476,8 @@ def _run_sequences(
             proxy_long_edge=proxy_long_edge,
             output_layout=output_layout,  # type: ignore[arg-type]
             pass_export_subdirs=stage_exports,
+            write_final_sidecars=write_final,
+            preload_sam3_artifacts_dir=preload_sam3_dir,
         )
         if vitmatte_model_dir:
             os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vitmatte_model_dir
@@ -407,8 +495,13 @@ def _run_sequences(
             for name in pass_names
         ]
         post_configs: list[PostConfig] = []
-        if "flow" in pass_names and _should_run_matte_temporal(shared):
-            post_configs = _ai_matte_post_configs(shared)
+        if phase == "temporal" or (
+            phase == "all" and "flow" in pass_names and _should_run_matte_temporal(shared)
+        ):
+            if phase == "temporal":
+                post_configs = _ai_matte_post_configs(shared)
+            elif _should_run_matte_temporal(shared):
+                post_configs = _ai_matte_post_configs(shared)
         job = Job(shot=shot, passes=pass_configs, post=post_configs)
         progress_cb = (
             status.make_laov_callback(shot_name, shot_idx, shot_total) if status else None

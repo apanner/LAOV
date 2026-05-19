@@ -98,8 +98,15 @@ def _run_colab_host_job(config_path: str, laov_git: str, date_folder: str) -> bo
         print("       Set laov_git_url in Desk to a branch that includes scripts/ai_matte_colab_run.py")
         script = os.path.join(laov_root, "scripts", "laov_colab_run.py")
     print("\n[COLAB] " + os.path.basename(script) + " (AI Matte batch)...")
-    cmd = [sys.executable, script, "--job-json", config_path, "--probe-first-frame"]
-    # Stream logs to the notebook (capture_output hides the real Colab error).
+    phase = "sam3"
+    try:
+        with open(config_path, encoding="utf-8") as _jf:
+            _cfg = json.load(_jf)
+        phase = str((_cfg.get("shared_settings") or {}).get("matte_pipeline_phase", "sam3"))
+    except Exception:
+        pass
+    cmd = [sys.executable, script, "--job-json", config_path, "--probe-first-frame", "--phase", phase]
+    print("[COLAB] matte_pipeline_phase=" + phase)
     r = subprocess.run(cmd, env=env)
     return r.returncode == 0
 
@@ -121,7 +128,8 @@ def process_ai_matte_cell3(
         or shared.get("laov_git_url")
         or "https://github.com/apanner/LAOV.git"
     )
-    print("\n[COLAB] AI Matte — SAM3 + refiner stage EXRs")
+    phase = str(shared.get("matte_pipeline_phase", "sam3"))
+    print("\n[COLAB] AI Matte phase=" + phase)
     try:
         ok = _run_colab_host_job(config_path, git_url, date_folder)
     except Exception as exc:
@@ -131,7 +139,7 @@ def process_ai_matte_cell3(
     if ok:
         print("\n[DONE] AI Matte batch finished.")
     else:
-        print("[ERROR] Batch failed — scroll up for traceback (SAM3 / models / plate paths).")
+        print("\n[ERROR] Batch failed - scroll up for traceback (SAM3 / models / plate paths).")
     root = shared.get("ai_matte_output_root", "AI_MATTE_output")
     out_path = shared.get("output_folder_path", "VDA_output")
     print(
