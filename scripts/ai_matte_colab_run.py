@@ -91,7 +91,7 @@ def _refiners_from_exports(shared: dict) -> list[str]:
     names: list[str] = []
     if bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner":
         names.append("birefnet_refiner")
-    if bool(shared.get("export_vitmatte_exr", True)) or refiner == "vitmatte_refiner":
+    if bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner":
         names.append("vitmatte_refiner")
     if refiner == "rvm_refiner":
         names.append("rvm_refiner")
@@ -109,7 +109,11 @@ def _build_ai_matte_pass_names(shared: dict, *, phase: str) -> list[str]:
 
     if phase == "stages":
         names = ["sam3_matte"]
-        names.extend(_refiners_from_exports(shared))
+        refiners = _refiners_from_exports(shared)
+        # Stable order: BiRefNet before ViTMatte (both only need SAM3 artifacts).
+        for r in ("birefnet_refiner", "vitmatte_refiner", "rvm_refiner"):
+            if r in refiners:
+                names.append(r)
         return names
 
     if phase == "sam3":

@@ -16,7 +16,7 @@ wildcards / pattern matching if we need it.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass
 
 
@@ -81,21 +81,28 @@ def topological_sort(nodes: list[PassNode]) -> list[PassNode]:
             incoming[node.name].add(provider.name)
             outgoing[provider.name].add(node.name)
 
-    # Kahn's algorithm, preserving input order for ties.
-    ready: deque[PassNode] = deque(n for n in nodes if not incoming[n.name])
+    # Kahn's algorithm — when several passes are ready, keep job YAML order.
+    order_idx = {n.name: i for i, n in enumerate(nodes)}
+    ready: list[PassNode] = sorted(
+        (n for n in nodes if not incoming[n.name]),
+        key=lambda n: order_idx[n.name],
+    )
     out: list[PassNode] = []
     seen: set[str] = set()
 
     while ready:
-        node = ready.popleft()
+        node = ready.pop(0)
         if node.name in seen:
             continue
         seen.add(node.name)
         out.append(node)
-        for dep_name in list(outgoing[node.name]):
+        newly_ready: list[PassNode] = []
+        for dep_name in outgoing[node.name]:
             incoming[dep_name].discard(node.name)
-            if not incoming[dep_name]:
-                ready.append(by_name[dep_name])
+            if not incoming[dep_name] and dep_name not in seen:
+                newly_ready.append(by_name[dep_name])
+        newly_ready.sort(key=lambda n: order_idx[n.name])
+        ready.extend(newly_ready)
 
     if len(out) != len(nodes):
         remaining = [n.name for n in nodes if n.name not in seen]

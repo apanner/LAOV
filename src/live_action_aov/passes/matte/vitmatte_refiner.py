@@ -161,6 +161,15 @@ class ViTMatteRefinerPass(UtilityPass):
             out[t] = alpha
         return out
 
+    def preprocess(self, frames: np.ndarray) -> Any:
+        return frames
+
+    def infer(self, tensor: Any) -> Any:
+        return tensor
+
+    def postprocess(self, tensor: Any) -> dict[str, np.ndarray]:
+        return {}
+
     def run_shot(
         self,
         reader: Any,
@@ -198,6 +207,11 @@ class ViTMatteRefinerPass(UtilityPass):
             f = first + i
             per_frame[f] = {ch: channel_stacks[ch][i] for ch in channel_stacks}
         return per_frame
+
+    def emit_artifacts(self) -> dict[str, dict[int, Any]]:
+        if not self._heroes:
+            return {}
+        return {"vitmatte_heroes": {0: list(self._heroes)}}
 
 
 __all__ = ["ViTMatteRefinerPass", "VITMATTE_CHANNELS"]
