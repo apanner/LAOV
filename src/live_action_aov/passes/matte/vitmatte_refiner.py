@@ -21,6 +21,7 @@ from live_action_aov.core.pass_base import (
     TemporalMode,
     UtilityPass,
 )
+from live_action_aov.passes.matte.keyframe_fill import fill_alpha_between_keyframes
 from live_action_aov.passes.matte.vitmatte_infer import ViTMatteSession, sam3_mask_to_trimap
 
 _log = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class ViTMatteRefinerPass(UtilityPass):
         "model_id": "hustvl/vitmatte-base-composition-1k",
         "model_path": None,
         "keyframe_stride": 4,
+        "fill_between_keyframes": True,
         # Pre-dilate SAM3 hard mask before trimap (expands fg seed; separate from trimap dilate).
         "hard_mask_dilate": 5,
         "trimap_erode_px": 10,
@@ -147,19 +149,35 @@ class ViTMatteRefinerPass(UtilityPass):
         stride = max(1, int(self.params.get("keyframe_stride", 4)))
         hard_proc = self._dilate_stack(hard_stack)
         key_indices = sorted({t for t in range(T) if t % stride == 0} | {T - 1})
-        out = np.zeros((T, H, W), dtype=np.float32)
-        for t in key_indices:
+        refined_keys: dict[int, np.ndarray] = {}
+        n_keys = len(key_indices)
+        log_step = max(1, n_keys // 10)
+        for ki, t in enumerate(key_indices):
+            if ki == 0 or ki == n_keys - 1 or (ki % log_step) == 0:
+                _log.info(
+                    "ViTMatte: keyframe %d/%d (local frame %d / %d)",
+                    ki + 1,
+                    n_keys,
+                    t,
+                    T,
+                )
             hard_t = hard_proc[t]
             if float(hard_t.sum()) < 1.0:
+                refined_keys[t] = np.zeros((H, W), dtype=np.float32)
                 continue
             trimap = self._trimap_from_hard(hard_t)
-            alpha = session.predict_alpha(
+            refined_keys[t] = session.predict_alpha(
                 plate_stack[t],
                 trimap,
                 instance_mask=hard_t,
             )
-            out[t] = alpha
-        return out
+        fill_between = bool(self.params.get("fill_between_keyframes", True))
+        return fill_alpha_between_keyframes(
+            T,
+            refined_keys,
+            fill_between=fill_between,
+            fallback_stack=hard_proc if not fill_between else None,
+        )
 
     def preprocess(self, frames: np.ndarray) -> Any:
         return frames

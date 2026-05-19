@@ -41,7 +41,7 @@ AI_MATTE_DEFAULTS = {
     "output_layout": "split_folders",
     "matte_mode": "people_fg",
     "matte_concepts": ["person"],
-    "fill_between_keyframes": False,
+    "fill_between_keyframes": True,
     "flow_backend": "raft_large",
     "flow_inference_resolution": 520,
     "matte_temporal_ema": 0.15,
@@ -437,6 +437,12 @@ def _run_sequences(
         shared.get("export_birefnet_exr", True),
         shared.get("export_vitmatte_exr", True),
         shared.get("qc_mp4", True),
+    )
+    _log.info(
+        "Refiner timing: keyframe_stride=%s fill_between_keyframes=%s "
+        "(neural infer every N frames; gaps filled by blend unless stride=1)",
+        shared.get("keyframe_stride", 4),
+        shared.get("fill_between_keyframes", True),
     )
     registry = get_registry()
     for name in pass_names:

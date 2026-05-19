@@ -11,8 +11,10 @@ Sequence feeding (Colab / ``ai_matte_colab_run.py``):
      then multiply by SAM3 mask to keep the tracked instance
    - ``crop``: BiRefNet on SAM3 bbox crop only (less VRAM, can miss context)
 
-BiRefNet is **not** temporal. With ``fill_between_keyframes: false`` (AI Matte default),
-only keyframes carry alpha; ``matte_flow_temporal`` post fills the shot using RAFT.
+BiRefNet is **not** temporal. With ``keyframe_stride`` > 1, inference runs on sparse
+keyframes only; ``fill_between_keyframes: true`` (AI Matte stage default) linearly
+interpolates alpha on in-between frames. Use ``matte_flow_temporal`` + RAFT for
+motion-aware fill instead of linear blend.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from live_action_aov.io.channels import (
     CH_MATTE_R,
 )
 from live_action_aov.passes.matte.birefnet_infer import BiRefNetSession
+from live_action_aov.passes.matte.keyframe_fill import fill_alpha_between_keyframes
 
 _log = logging.getLogger(__name__)
 
@@ -109,6 +112,7 @@ class BiRefNetRefinerPass(UtilityPass):
         "crop_pad": 32,
         "inference_size": 1024,
         "keyframe_stride": 4,
+        "fill_between_keyframes": True,
         "hard_mask_dilate": 5,
         "refine_foreground": True,
         "refine_radius": 90,
@@ -235,26 +239,13 @@ class BiRefNetRefinerPass(UtilityPass):
                 alpha = self._alpha_full_frame(session, rgb, hard_t)
             refined_keys[t] = alpha
 
-        out = np.zeros((T, H, W), dtype=np.float32)
-        if not refined_keys:
-            return out
-        fill_between = bool(self.params.get("fill_between_keyframes", False))
-        for t, alpha in refined_keys.items():
-            out[t] = alpha
-        if not fill_between:
-            return out
-        key_list = sorted(refined_keys.keys())
-        for t in range(T):
-            if t in refined_keys:
-                continue
-            prev_k = max(k for k in key_list if k <= t)
-            next_k = min(k for k in key_list if k >= t)
-            if prev_k == next_k:
-                out[t] = refined_keys[prev_k]
-            else:
-                w = (t - prev_k) / max(next_k - prev_k, 1)
-                out[t] = (1.0 - w) * refined_keys[prev_k] + w * refined_keys[next_k]
-        return out
+        fill_between = bool(self.params.get("fill_between_keyframes", True))
+        return fill_alpha_between_keyframes(
+            T,
+            refined_keys,
+            fill_between=fill_between,
+            fallback_stack=hard_proc if not fill_between else None,
+        )
 
     def preprocess(self, frames: np.ndarray) -> Any:
         return frames

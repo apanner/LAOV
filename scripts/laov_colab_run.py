@@ -182,7 +182,14 @@ def _matte_pass_params(
         if shared.get("birefnet_crop_pad") is not None and "crop_pad" not in params:
             params["crop_pad"] = shared["birefnet_crop_pad"]
         passes_csv = str(shared.get("passes_csv", ""))
-        if "fill_between_keyframes" not in params and "flow" in passes_csv:
+        model_type = str(shared.get("model_type", ""))
+        # Legacy depth jobs: sparse BiRefNet + RAFT temporal fill. AI Matte stage EXRs need
+        # every frame filled when flow temporal is off.
+        if (
+            "fill_between_keyframes" not in params
+            and "flow" in passes_csv
+            and model_type != "AI_MATTE_STANDALONE"
+        ):
             params["fill_between_keyframes"] = False
 
     if name == "vitmatte_refiner":
@@ -191,6 +198,7 @@ def _matte_pass_params(
             params["model_path"] = vit_dir
         for key in (
             "keyframe_stride",
+            "fill_between_keyframes",
             "hard_mask_dilate",
             "trimap_erode_px",
             "trimap_dilate_px",
