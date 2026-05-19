@@ -57,6 +57,7 @@ AI_MATTE_DEFAULTS = {
     "run_matte_flow_temporal": False,
     "matte_pipeline_phase": "stages",
     "qc_mp4": True,
+    "proxy_long_edge": None,
 }
 
 
@@ -419,7 +420,10 @@ def _run_sequences(
     colorspace = shared.get("colorspace")
     colorspace_s = str(colorspace) if colorspace else "auto"
     proxy_raw = shared.get("proxy_long_edge")
-    proxy_long_edge = int(proxy_raw) if proxy_raw is not None else None
+    if proxy_raw in (None, "", 0, "0"):
+        proxy_long_edge = None
+    else:
+        proxy_long_edge = int(proxy_raw)
     output_layout = str(shared.get("output_layout", "split_folders"))
 
     pass_names = _build_ai_matte_pass_names(shared, phase=phase)
@@ -492,14 +496,15 @@ def _run_sequences(
 
         matte_cfg = seq.get("matte_config") or {}
         _log.info(
-            "Shot %s: plate=%s pattern=%s frames=%s-%s matte_mode=%s boxes=%s",
+            "Shot %s: plate=%s pattern=%s frames=%s-%s res=%s proxy=%s matte_mode=%s",
             shot_name,
             plate_dir,
             pattern,
             f0,
             f1,
+            resolution or "full",
+            proxy_long_edge or "off (full res)",
             matte_cfg.get("matte_mode", shared.get("matte_mode")),
-            len(matte_cfg.get("box_prompts") or []),
         )
 
         if probe_first_frame:

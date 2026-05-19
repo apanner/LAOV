@@ -57,7 +57,7 @@ from live_action_aov.core.pass_base import (
     TemporalMode,
     UtilityPass,
 )
-from live_action_aov.io.channels import MASK_PREFIX
+from live_action_aov.io.channels import MASK_PREFIX, MATTE_CHANNELS
 from live_action_aov.passes.matte.rank import (
     HeroOverride,
     Instance,
@@ -786,6 +786,18 @@ class SAM3MattePass(UtilityPass):
             max_heroes=int(self.params["max_heroes"]),
             overrides=overrides,
         )
+        # Hero slots as matte.r/g/b/a for RGBA stage EXR export (no mask.* in deliverables).
+        _slot_channels = dict(zip(("r", "g", "b", "a"), MATTE_CHANNELS, strict=False))
+        inst_by_track = {inst.track_id: inst for inst in self._instances}
+        for hero in self._heroes:
+            inst = inst_by_track.get(hero.track_id)
+            if inst is None:
+                continue
+            ch = _slot_channels.get(hero.slot)
+            if not ch:
+                continue
+            for f, mask in inst.masks.items():
+                per_frame.setdefault(f, {})[ch] = mask.astype(np.float32, copy=False)
         return per_frame
 
     def _to_rank_instance(

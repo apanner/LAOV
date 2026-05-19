@@ -109,9 +109,9 @@ Default Desk layout (`output_folder_path` is usually `VDA_output`, date from Col
 
 ```text
 MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
-  matte_sam3/      # SAM3 only — mask.<concept> EXRs
-  matte_birefnet/  # BiRefNet soft matte — matte.r/g/b/a (every frame by default)
-  matte_vitmatte/  # ViTMatte — vitmatte.r/g/b/a (optional, trimap from SAM3)
+  matte_sam3/      # SAM3 hard matte — one RGBA EXR per hero slot (R,G,B,A only)
+  matte_birefnet/ # BiRefNet soft matte — RGBA per slot (full plate resolution)
+  matte_vitmatte/  # ViTMatte soft matte — RGBA per slot (optional)
   matte/           # Final temporal matte (BiRefNet + RAFT fill) when enabled in Desk
   flow/            # RAFT motion (optional; not a matte)
   qc/              # MP4 per stage (*_sam3_*, *_birefnet_*, *_final_*, …)

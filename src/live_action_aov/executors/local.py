@@ -217,7 +217,7 @@ class LocalExecutor(Executor):
                         flow_cache.put(shot.name, f, "backward", arr)
 
                 export_subdir = shot.pass_export_subdirs.get(node.name)
-                if export_subdir and sidecar_dir and per_frame_channels:
+                if export_subdir and sidecar_dir and frame_outputs:
                     from live_action_aov.io.stage_export import write_pass_stage_export
 
                     write_pass_stage_export(
@@ -225,7 +225,7 @@ class LocalExecutor(Executor):
                         export_subdir=export_subdir,
                         output_root=sidecar_dir,
                         sequence_pattern=shot.sequence_pattern,
-                        per_frame_channels=per_frame_channels,
+                        per_frame_channels=frame_outputs,
                         shot_name=shot.name,
                         pixel_aspect=shot.pixel_aspect,
                     )

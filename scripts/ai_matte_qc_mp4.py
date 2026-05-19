@@ -14,22 +14,37 @@ _log = logging.getLogger("ai_matte_qc_mp4")
 _FRAME_RE = re.compile(r"\.(\d+)\.exr$", re.IGNORECASE)
 
 STAGE_DIRS: tuple[tuple[str, str, str], ...] = (
-    ("matte_sam3", "sam3", "mask"),
-    ("matte_birefnet", "birefnet", "matte"),
-    ("matte_vitmatte", "vitmatte", "vitmatte"),
-    ("matte", "final", "matte"),
-    ("vitmatte", "final_vitmatte", "vitmatte"),
+    ("matte_sam3", "sam3", "rgba"),
+    ("matte_birefnet", "birefnet", "rgba"),
+    ("matte_vitmatte", "vitmatte", "rgba"),
+    ("matte", "final", "rgba"),
+    ("vitmatte", "final_vitmatte", "rgba"),
 )
+
+_RGBA_SLOT_RE = re.compile(r"_matte_([rgba])\.(\d+)\.exr$", re.IGNORECASE)
 
 
 def _sorted_exrs(folder: Path) -> list[tuple[int, Path]]:
     if not folder.is_dir():
         return []
+    rgba = _sorted_rgba_slot_exrs(folder, slot="r")
+    if rgba:
+        return rgba
     found: list[tuple[int, Path]] = []
     for path in sorted(folder.glob("*.exr")):
         m = _FRAME_RE.search(path.name)
         if m:
             found.append((int(m.group(1)), path))
+    return sorted(found, key=lambda x: x[0])
+
+
+def _sorted_rgba_slot_exrs(folder: Path, *, slot: str = "r") -> list[tuple[int, Path]]:
+    """One EXR per frame for a hero slot (RGBA deliverables)."""
+    found: list[tuple[int, Path]] = []
+    for path in sorted(folder.glob("*.exr")):
+        m = _RGBA_SLOT_RE.search(path.name)
+        if m and m.group(1).lower() == slot.lower():
+            found.append((int(m.group(2)), path))
     return sorted(found, key=lambda x: x[0])
 
 
@@ -128,7 +143,14 @@ def _export_stage_mp4(
     frames_rgb: list[np.ndarray] = []
     for frame_idx, exr_path in entries:
         pixels, names = _read_exr_channels(exr_path)
-        if channel_kind == "mask":
+        if channel_kind == "rgba":
+            vis = _channel_plane(pixels, names, "A")
+            if vis is None:
+                vis = _channel_plane(pixels, names, "R")
+            if vis is None:
+                continue
+            rgb = np.stack([vis, vis, vis], axis=-1)
+        elif channel_kind == "mask":
             vis = _union_masks(pixels, names, "mask.")
             if vis is None:
                 continue

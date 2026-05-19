@@ -46,8 +46,28 @@ def write_pass_stage_export(
     shot_name: str,
     pixel_aspect: float = 1.0,
     attrs_extra: dict[str, Any] | None = None,
+    rgba_matte: bool = True,
 ) -> Path | None:
     """Write one pass snapshot under ``output_root / export_subdir /``."""
+    if rgba_matte and pass_name in (
+        "sam3_matte",
+        "birefnet_refiner",
+        "vitmatte_refiner",
+        "rvm_refiner",
+    ):
+        from live_action_aov.io.rgba_matte_export import write_rgba_matte_stage_export
+
+        return write_rgba_matte_stage_export(
+            pass_name=pass_name,
+            export_subdir=export_subdir,
+            output_root=output_root,
+            sequence_pattern=sequence_pattern,
+            per_frame_channels=per_frame_channels,
+            shot_name=shot_name,
+            pixel_aspect=pixel_aspect,
+            attrs_extra=attrs_extra,
+        )
+
     stage_dir = (output_root / export_subdir).resolve()
     filtered_frames: dict[int, dict[str, np.ndarray]] = {}
     for frame_idx, channels in per_frame_channels.items():
