@@ -365,6 +365,15 @@ class LocalExecutor(Executor):
 
             first_written: Path | None = None
             split_roots: dict[str, Path] = {}
+            if not shot.write_final_sidecars:
+                _log.info(
+                    "Skipping final sidecar write (stage exports only); subdirs=%s",
+                    sorted(shot.pass_export_subdirs.values()),
+                )
+                shot.status = "done"
+                report(1.0, "Done (stage exports only).")
+                return
+
             total_frames = max(1, len(per_frame_channels))
             for frame_write_idx, (frame_idx, channels) in enumerate(per_frame_channels.items()):
                 # Cancel checkpoint #2: between sidecar writes. Each

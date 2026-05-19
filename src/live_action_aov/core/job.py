@@ -109,6 +109,10 @@ class Shot(BaseModel):
     # Example: {"sam3_matte": "matte_sam3", "birefnet_refiner": "matte_birefnet"}.
     pass_export_subdirs: dict[str, str] = Field(default_factory=dict)
 
+    # When False, skip the final split-folder write (matte/, flow/, vitmatte/) and rely on
+    # ``pass_export_subdirs`` stage snapshots only (Desk "stage EXR" checkboxes).
+    write_final_sidecars: bool = True
+
     status: ShotStatus = "new"
     notes: str = ""
 

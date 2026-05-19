@@ -124,7 +124,7 @@ MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
 | **`flow/`** | Optical flow (motion vectors). Intermediate data for `matte_flow_temporal` — not for comp mattes. |
 | **`matte/*.matte.<frame>.exr`** | Multi-channel EXR per frame. |
 | → `mask.<concept>` | **SAM3** — hard union masks per concept (e.g. `mask.person`). |
-| → `matte.r/g/b/a` | **BiRefNet** soft hero mattes, then **temporal post** fills every frame using `flow/`. |
+| → `matte.r/g/b/a` | Optional: **RAFT temporal fill** (`export_final_exr`) — off by default; use stage folders instead. |
 | **`qc/*_sam3_matte_qc.mp4`** | Preview of SAM3 `mask.*` (green on plate). |
 | **`qc/*_final_matte_qc.mp4`** | Preview of final `matte.*` (BiRefNet + temporal). |
 
@@ -132,7 +132,8 @@ MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
 
 ```text
 Plate → RAFT (flow/) → SAM3 track (mask.*) → BiRefNet refine (matte.r/g/b/a on keyframes)
-      → matte_flow_temporal (warp/fill using flow/) → write matte/ EXRs → qc/ MP4s
+      → (optional) matte_flow_temporal → matte/ EXRs
+      → stage EXRs: matte_sam3/, matte_birefnet/, matte_vitmatte/ → qc/ MP4s
 ```
 
 Example EXR:

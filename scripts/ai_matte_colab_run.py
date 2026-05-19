@@ -49,9 +49,10 @@ AI_MATTE_DEFAULTS = {
     "propagation_mode": "nearest_anchor",
     "export_sam3_exr": True,
     "export_birefnet_exr": True,
-    "export_vitmatte_exr": False,
-    "export_final_exr": True,
-    "export_flow_exr": True,
+    "export_vitmatte_exr": True,
+    "export_final_exr": False,
+    "export_flow_exr": False,
+    "run_matte_flow_temporal": False,
     "qc_mp4": True,
 }
 
@@ -97,6 +98,15 @@ def _stage_export_map(shared: dict) -> dict[str, str]:
     if shared.get("export_vitmatte_exr", False):
         exports["vitmatte_refiner"] = "matte_vitmatte"
     return exports
+
+
+def _should_run_matte_temporal(shared: dict) -> bool:
+    refiner = str(shared.get("refiner", "birefnet_refiner"))
+    if refiner == "vitmatte_refiner":
+        return False
+    if not bool(shared.get("run_matte_flow_temporal", False)):
+        return False
+    return bool(shared.get("export_final_exr", False))
 
 
 def _ai_matte_post_configs(shared: dict) -> list:
@@ -390,7 +400,7 @@ def _run_sequences(
             for name in pass_names
         ]
         post_configs: list[PostConfig] = []
-        if "flow" in pass_names and shared.get("export_final_exr", True):
+        if "flow" in pass_names and _should_run_matte_temporal(shared):
             post_configs = _ai_matte_post_configs(shared)
         job = Job(shot=shot, passes=pass_configs, post=post_configs)
         progress_cb = (
