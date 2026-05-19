@@ -344,6 +344,10 @@ def main() -> int:
         _log.error("No sequences in job JSON")
         return 1
 
+    status = reporter_from_job_json(mount, cfg)
+    if status:
+        status.begin_run(f"AI Matte phase={phase}")
+
     try:
         return _run_sequences(
             cfg,
@@ -354,9 +358,12 @@ def main() -> int:
             matte_detector=matte_detector,
             refiner=refiner,
             probe_first_frame=args.probe_first_frame,
+            status=status,
         )
     except Exception:
         _log.error("AI Matte runner crashed:\n%s", traceback.format_exc())
+        if status:
+            status.finish_run(ok=False)
         return 1
 
 
@@ -366,6 +373,7 @@ def _run_sequences(
     shared: dict,
     sequences: list,
     *,
+    phase: str,
     matte_detector: str,
     refiner: str,
     probe_first_frame: bool,

@@ -108,6 +108,9 @@ def _run_colab_host_job(config_path: str, laov_git: str, date_folder: str) -> bo
     cmd = [sys.executable, script, "--job-json", config_path, "--probe-first-frame", "--phase", phase]
     print("[COLAB] matte_pipeline_phase=" + phase)
     r = subprocess.run(cmd, env=env)
+    if r.returncode != 0:
+        print("\n[ERROR] ai_matte_colab_run.py exited with code " + str(r.returncode))
+        print("        Scroll up in this cell for ERROR / Traceback lines above.")
     return r.returncode == 0
 
 
