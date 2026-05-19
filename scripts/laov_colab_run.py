@@ -146,6 +146,10 @@ def _matte_pass_params(
             params["sample_frame"] = matte["sample_frame"]
         if matte.get("confidence_threshold") is not None:
             params["confidence_threshold"] = matte["confidence_threshold"]
+        for key in ("sam3_max_plate_stack_gb", "sam3_proxy_long_edge"):
+            val = matte.get(key, shared.get(key))
+            if val is not None:
+                params[key] = val
 
     if name == "flow":
         for key in (

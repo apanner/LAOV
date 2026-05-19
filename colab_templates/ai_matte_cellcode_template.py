@@ -118,6 +118,12 @@ def _run_colab_host_job(config_path: str, laov_git: str, date_folder: str) -> bo
     ]
     print("\n[STEP] Run batch — matte_pipeline_phase=" + phase)
     r = subprocess.run(cmd, env=env)
+    if r.returncode != 0:
+        print(
+            "\n[STOP] Batch exited with code %s — scroll up for the first "
+            "[ERROR] line (OOM on long 4K clips is common; LAOV auto-downscales SAM3)."
+            % r.returncode
+        )
     return r.returncode == 0
 
 

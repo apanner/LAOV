@@ -237,6 +237,10 @@ class SAM3MattePass(UtilityPass):
         "matte_mode": "auto",  # auto | notes | people_fg | bbox | concepts
         # Per-shot matte notes: [{"label": "bg yellow guy", "prompt": "...", "slot": "r"}]
         "matte_notes": [],
+        # Auto downscale SAM3 working plates when float32 stack would exceed RAM (Colab).
+        "sam3_max_plate_stack_gb": 14.0,
+        # Optional SAM3-only long edge (deliverable masks are still upscaled to full plate).
+        "sam3_proxy_long_edge": None,
     }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -680,14 +684,43 @@ class SAM3MattePass(UtilityPass):
     ) -> dict[int, dict[str, np.ndarray]]:
         first, last = frame_range
         n_frames = last - first + 1
-        _log.info("SAM3: reading %d plate frames (%s-%s)…", n_frames, first, last)
-        frames = np.stack([reader.read_frame(f)[0] for f in range(first, last + 1)], axis=0)
-        plate_h, plate_w = int(frames.shape[1]), int(frames.shape[2])
-        _log.info("SAM3: plate stack %s — detect & track", frames.shape)
+        seed_rgb_full, _attrs0 = reader.read_frame(first)
+        plate_h, plate_w = int(seed_rgb_full.shape[0]), int(seed_rgb_full.shape[1])
         self._plate_shape = (plate_h, plate_w)
+        work_h, work_w = _sam3_working_size(
+            plate_h,
+            plate_w,
+            n_frames,
+            max_stack_gb=float(self.params.get("sam3_max_plate_stack_gb", 14.0)),
+            proxy_long_edge=self.params.get("sam3_proxy_long_edge"),
+        )
+        est_gib = _estimate_plate_stack_gib(n_frames, plate_h, plate_w)
+        if (work_h, work_w) != (plate_h, plate_w):
+            _log.warning(
+                "SAM3: plate stack would be ~%.1f GiB at %dx%d — tracking at %dx%d, "
+                "masks upscaled to full plate for BiRefNet/ViTMatte",
+                est_gib,
+                plate_w,
+                plate_h,
+                work_w,
+                work_h,
+            )
+        else:
+            _log.info(
+                "SAM3: reading %d plate frames (%s-%s) at full res (~%.1f GiB stack)…",
+                n_frames,
+                first,
+                last,
+                est_gib,
+            )
+        frames = _build_sam3_plate_stack(
+            reader, first, last, work_h=work_h, work_w=work_w
+        )
+        _log.info("SAM3: plate stack %s — detect & track", frames.shape)
 
         seed_local = _pick_seed_frame(n_frames, self.params["sample_frame"])
         seed_rgb = frames[seed_local]
+        work_h, work_w = int(frames.shape[1]), int(frames.shape[2])
 
         box_prompts = list(self.params.get("box_prompts") or [])
         matte_mode = str(self.params.get("matte_mode", "auto")).strip().lower()
@@ -705,7 +738,7 @@ class SAM3MattePass(UtilityPass):
             concepts = [str(c) for c in self.params.get("concepts") or ["person", "vehicle", "animal"]]
 
         if box_prompts:
-            seeds = self._seeds_from_box_prompts(seed_rgb, box_prompts, plate_h, plate_w)
+            seeds = self._seeds_from_box_prompts(seed_rgb, box_prompts, work_h, work_w)
         elif matte_mode == "notes" and matte_notes:
             seeds = self._seeds_from_matte_notes(seed_rgb, matte_notes)
         else:
@@ -716,25 +749,28 @@ class SAM3MattePass(UtilityPass):
         _log.info("SAM3: tracking %d instance(s) across %d frames", len(seeds), n_frames)
         for track_id, label, seed_mask in seeds:
             _log.info("SAM3: track %s (%s) — video propagate…", track_id, label)
-            if seed_mask.shape != (plate_h, plate_w):
-                raise ValueError(
-                    f"Seed mask for track {track_id} has shape {seed_mask.shape}, "
-                    f"expected plate shape {(plate_h, plate_w)}"
-                )
+            if seed_mask.shape != (work_h, work_w):
+                seed_mask = _resize_mask_plane(seed_mask, work_h, work_w)
             stack = self._track_instance(frames, seed_local, seed_mask)
-            if stack.ndim != 3 or stack.shape[1:] != (plate_h, plate_w):
+            if stack.ndim != 3 or stack.shape[1:] != (work_h, work_w):
                 raise ValueError(
                     f"Track stack for {track_id} has shape {stack.shape}, "
-                    f"expected ({n_frames}, {plate_h}, {plate_w})"
+                    f"expected ({n_frames}, {work_h}, {work_w})"
                 )
             masks = {
-                first + k: stack[k].astype(np.float32, copy=False) for k in range(stack.shape[0])
+                first + k: _resize_mask_plane(stack[k], plate_h, plate_w)
+                for k in range(stack.shape[0])
             }
             # Drop instances that fall below the area floor everywhere.
             area_floor = float(self.params["min_area_fraction"]) * plate_h * plate_w
             if all(m.sum() < area_floor for m in masks.values()):
                 continue
             self._instances.append(_DetectedInstance(track_id, label, masks))
+
+        del frames
+        import gc
+
+        gc.collect()
 
         # Union by concept into per-frame channels.
         per_frame: dict[int, dict[str, np.ndarray]] = {first + i: {} for i in range(n_frames)}
@@ -940,6 +976,82 @@ class SAM3MattePass(UtilityPass):
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _estimate_plate_stack_gib(n_frames: int, plate_h: int, plate_w: int) -> float:
+    return n_frames * plate_h * plate_w * 3 * 4 / (1024**3)
+
+
+def _sam3_working_size(
+    plate_h: int,
+    plate_w: int,
+    n_frames: int,
+    *,
+    max_stack_gb: float,
+    proxy_long_edge: Any,
+) -> tuple[int, int]:
+    """Working H×W for SAM3 plate stack (may be smaller than deliverable plate)."""
+    if proxy_long_edge not in (None, "", 0, "0"):
+        long_edge = int(proxy_long_edge)
+        long_src = max(plate_h, plate_w)
+        if long_src <= long_edge:
+            return plate_h, plate_w
+        scale = long_edge / float(long_src)
+        return (
+            max(64, int(round(plate_h * scale))),
+            max(64, int(round(plate_w * scale))),
+        )
+    if max_stack_gb <= 0 or n_frames <= 0:
+        return plate_h, plate_w
+    budget_pixels = max_stack_gb * (1024**3) / (n_frames * 3 * 4)
+    plate_pixels = plate_h * plate_w
+    if budget_pixels >= plate_pixels:
+        return plate_h, plate_w
+    scale = (budget_pixels / plate_pixels) ** 0.5
+    return (
+        max(64, int(round(plate_h * scale))),
+        max(64, int(round(plate_w * scale))),
+    )
+
+
+def _resize_rgb_plane(rgb: np.ndarray, work_h: int, work_w: int) -> np.ndarray:
+    rgb = np.clip(np.asarray(rgb, dtype=np.float32)[..., :3], 0.0, 1.0)
+    if rgb.shape[0] == work_h and rgb.shape[1] == work_w:
+        return rgb
+    if cv2 is None:
+        raise ImportError("opencv-python-headless required for SAM3 plate resize")
+    return cv2.resize(rgb, (work_w, work_h), interpolation=cv2.INTER_AREA)
+
+
+def _resize_mask_plane(mask: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    m = np.clip(np.asarray(mask, dtype=np.float32), 0.0, 1.0)
+    if m.ndim == 3 and m.shape[-1] == 1:
+        m = m[..., 0]
+    if m.shape[0] == out_h and m.shape[1] == out_w:
+        return m
+    if cv2 is None:
+        raise ImportError("opencv-python-headless required for SAM3 mask resize")
+    return cv2.resize(m, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+
+
+def _build_sam3_plate_stack(
+    reader: Any,
+    first: int,
+    last: int,
+    *,
+    work_h: int,
+    work_w: int,
+) -> np.ndarray:
+    """One frame at a time — avoids holding a list of full-res arrays."""
+    n_frames = last - first + 1
+    stack = np.empty((n_frames, work_h, work_w, 3), dtype=np.float32)
+    log_step = max(1, n_frames // 10)
+    for i, frame_idx in enumerate(range(first, last + 1)):
+        if i == 0 or i == n_frames - 1 or (i + 1) % log_step == 0:
+            _log.info("SAM3: loading plate %d/%d (frame %s)", i + 1, n_frames, frame_idx)
+        rgb, _attrs = reader.read_frame(frame_idx)
+        stack[i] = _resize_rgb_plane(rgb, work_h, work_w)
+    return stack
 
 
 def _pick_seed_frame(n_frames: int, sample_frame: Any) -> int:

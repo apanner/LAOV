@@ -64,6 +64,8 @@ AI_MATTE_DEFAULTS = {
     "vitmatte_crop_pad": 32,
     "use_plate_jpeg_cache": True,
     "plate_jpeg_quality": 92,
+    # SAM3: auto downscale tracking when 4K×long clips would exceed ~14 GiB RAM.
+    "sam3_max_plate_stack_gb": 14.0,
 }
 
 
@@ -585,6 +587,16 @@ def _run_sequences(
                     shot_name=shot_name,
                 )
             laov_run(job, progress_callback=progress_cb)
+        except MemoryError:
+            _log.error(
+                "Run failed for %s: out of memory. For long 4K clips use proxy in Desk "
+                "or lower sam3_max_plate_stack_gb (auto SAM3 downscale is enabled by default).",
+                shot_name,
+            )
+            if status:
+                status.shot_end(shot_name, ok=False, message="out of memory")
+            any_failed = True
+            continue
         except Exception:
             _log.error("Run failed for %s:\n%s", shot_name, traceback.format_exc())
             if status:
@@ -620,10 +632,14 @@ def _run_sequences(
                     _log.warning("QC MP4 export failed for %s: %s", shot_name, exc)
 
     if any_failed:
+        _log.error(
+            "AI Matte batch finished with failures — successful shots kept outputs; "
+            "re-run with matte_pipeline_phase=refine for shots that only need BiRefNet/ViTMatte."
+        )
         if status:
             status.finish_run(ok=False)
         return 1
-    _log.info("AI Matte — all sequences complete.")
+    _log.info("AI Matte — all %d sequence(s) complete.", shot_total)
     if status:
         status.finish_run(ok=True)
     return 0
