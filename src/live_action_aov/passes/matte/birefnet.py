@@ -111,7 +111,7 @@ class BiRefNetRefinerPass(UtilityPass):
         "inference_mode": "full_frame",
         "crop_pad": 32,
         "inference_size": 1024,
-        "keyframe_stride": 4,
+        "keyframe_stride": 1,
         "fill_between_keyframes": True,
         "hard_mask_dilate": 5,
         "refine_foreground": True,

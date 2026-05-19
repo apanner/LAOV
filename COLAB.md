@@ -99,8 +99,9 @@ Colab Cell 3 runs the **dedicated** runner (not the generic LAOV batch script):
 python scripts/ai_matte_colab_run.py --job-json /content/ai_matte_config.json --probe-first-frame
 ```
 
-Batch uses `passes_csv: flow,matte` (RAFT optical flow → SAM3 → BiRefNet keyframes →
-`matte_flow_temporal` post), `refiner: birefnet_refiner`, models from Drive paths below.
+Default **stages** job: SAM3 (all frames) → BiRefNet (every frame, `keyframe_stride: 1`) →
+optional ViTMatte. **RAFT / flow is not in this run** — use Colab phase **temporal** later
+if you want motion-guided `matte/` fill.
 
 ### AI Matte output folder structure
 
@@ -109,8 +110,8 @@ Default Desk layout (`output_folder_path` is usually `VDA_output`, date from Col
 ```text
 MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
   matte_sam3/      # SAM3 only — mask.<concept> EXRs
-  matte_birefnet/  # BiRefNet keyframes only — matte.r/g/b/a (before temporal)
-  matte_vitmatte/  # ViTMatte keyframes — vitmatte.r/g/b/a (optional, trimap from SAM3)
+  matte_birefnet/  # BiRefNet soft matte — matte.r/g/b/a (every frame by default)
+  matte_vitmatte/  # ViTMatte — vitmatte.r/g/b/a (optional, trimap from SAM3)
   matte/           # Final temporal matte (BiRefNet + RAFT fill) when enabled in Desk
   flow/            # RAFT motion (optional; not a matte)
   qc/              # MP4 per stage (*_sam3_*, *_birefnet_*, *_final_*, …)
@@ -131,9 +132,12 @@ MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
 **Pipeline (yes — BiRefNet uses SAM3)**
 
 ```text
-Plate → RAFT (flow/) → SAM3 track (mask.*) → BiRefNet refine (matte.r/g/b/a on keyframes)
-      → (optional) matte_flow_temporal → matte/ EXRs
+Plate → SAM3 track (mask.*, all frames) → BiRefNet refine (matte.r/g/b/a, every frame)
+      → optional ViTMatte (vitmatte.*)
       → stage EXRs: matte_sam3/, matte_birefnet/, matte_vitmatte/ → qc/ MP4s
+
+Optional later (separate Colab phase **temporal**):
+Plate → RAFT (flow/) → matte_flow_temporal → combined matte/ EXRs
 ```
 
 Example EXR:

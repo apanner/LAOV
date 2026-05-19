@@ -76,7 +76,7 @@ class ViTMatteRefinerPass(UtilityPass):
     DEFAULT_PARAMS: dict[str, Any] = {
         "model_id": "hustvl/vitmatte-base-composition-1k",
         "model_path": None,
-        "keyframe_stride": 4,
+        "keyframe_stride": 1,
         "fill_between_keyframes": True,
         # Pre-dilate SAM3 hard mask before trimap (expands fg seed; separate from trimap dilate).
         "hard_mask_dilate": 5,

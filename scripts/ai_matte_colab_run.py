@@ -34,13 +34,16 @@ from colab_run_status import ColabRunStatus, configure_flushed_logging, reporter
 _log = logging.getLogger("ai_matte_colab_run")
 
 AI_MATTE_DEFAULTS = {
-    "passes_csv": "flow,matte",
+    # Stage jobs: matte only. RAFT/flow is optional phase ``temporal`` (separate Colab run).
+    "passes_csv": "matte",
     "matte_detector": "sam3_matte",
     "refiner": "birefnet_refiner",
     "display_transform": True,
     "output_layout": "split_folders",
     "matte_mode": "people_fg",
     "matte_concepts": ["person"],
+    # 1 = BiRefNet/ViTMatte on every frame (no sparse keyframes + blend).
+    "keyframe_stride": 1,
     "fill_between_keyframes": True,
     "flow_backend": "raft_large",
     "flow_inference_resolution": 520,
@@ -441,7 +444,7 @@ def _run_sequences(
     _log.info(
         "Refiner timing: keyframe_stride=%s fill_between_keyframes=%s "
         "(neural infer every N frames; gaps filled by blend unless stride=1)",
-        shared.get("keyframe_stride", 4),
+        shared.get("keyframe_stride", 1),
         shared.get("fill_between_keyframes", True),
     )
     registry = get_registry()
