@@ -20,7 +20,7 @@ COLAB_PIP_DEPS: tuple[str, ...] = (
     "PyYAML>=6.0",
     "oiio-python>=2.5",
     "opencolorio>=2.3",
-    "transformers>=4.45",
+    "transformers>=4.51.0",
     "huggingface-hub>=0.23",
     "tokenizers",
     "safetensors",

@@ -87,9 +87,31 @@ Colab Cell 3 runs the **dedicated** runner (not the generic LAOV batch script):
 python scripts/ai_matte_colab_run.py --job-json /content/ai_matte_config.json --probe-first-frame
 ```
 
-Batch uses `passes_csv: matte`, `refiner: birefnet_refiner`, models from Drive paths below.
+Batch uses `passes_csv: flow,matte` (RAFT optical flow → SAM3 → BiRefNet keyframes →
+`matte_flow_temporal` post), `refiner: birefnet_refiner`, models from Drive paths below.
 
-**Git:** push LAOV `main` so Colab clone includes `scripts/ai_matte_colab_run.py` and `birefnet_refiner` in `pyproject.toml`. In Desk, set **LAOV repo** to your fork URL if needed.
+### AI Matte output folder structure
+
+Default Desk layout (`output_folder_path` is usually `VDA_output`, date from Colab env):
+
+```text
+MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
+  matte/           # hero mattes — matte.r, matte.g, matte.b, matte.a per frame
+  flow/            # RAFT motion sidecars (when flow pass is enabled)
+  laov_run.log
+```
+
+Example:
+
+```text
+MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_020_plate_v001.matte.1001.exr
+```
+
+`shot_name` comes from the sequence / folder leaf in the batch JSON. EXR plates may live in a **subfolder** (e.g. `.../TB_073_020_plate_v001/exr/`); `ai_matte_colab_run.py` searches nested folders under the JSON path and under `VDA_input/` when the exact path is missing.
+
+**Plate paths:** Desk writes exact Colab-relative file paths into the batch JSON (`plate_first_frame_relpath`, `plate_input_pattern`). Colab joins them to `/content/drive/MyDrive/` — no folder search. Re-send from AI Matte Desk after refreshing Drive paths. If the first-frame file is missing on the mount, sync `S:\VDA_input\...` to Google Drive cloud.
+
+**Git:** push LAOV `main` so Colab clone includes `scripts/ai_matte_colab_run.py`, nested plate search in `laov_colab_run.py`, and `birefnet_refiner` in `pyproject.toml`. In Desk, set **LAOV repo** to your fork URL if needed.
 
 See `colab_ai/README.md`.
 
@@ -112,6 +134,16 @@ MyDrive/VDA_models/ZhengPeng7/BiRefNet/model.safetensors
 ```
 
 Verify: `python scripts/download_birefnet_for_drive.py --verify-only`
+
+## SAM3 + transformers on Colab
+
+If SAM3 tracking fails with ``fpn_position_embeddings``, upgrade transformers then re-run Cell 2 setup:
+
+```bash
+pip install -q -U "transformers>=4.51.0"
+```
+
+LAOV also applies a runtime alias patch in ``sam3_matte`` for older Colab caches.
 
 ## Hugging Face login (only if SAM3 is not on Drive)
 

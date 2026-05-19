@@ -16,9 +16,11 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
+from typing import Any, Callable
 
 _log = logging.getLogger("laov_colab_run")
 
@@ -120,6 +122,24 @@ def _matte_pass_params(
         if matte.get("confidence_threshold") is not None:
             params["confidence_threshold"] = matte["confidence_threshold"]
 
+    if name == "flow":
+        for key in (
+            "backend",
+            "precision",
+            "inference_resolution",
+            "fb_threshold_px",
+            "num_flow_updates",
+        ):
+            val = shared.get(key)
+            if val is None:
+                val = shared.get(f"flow_{key}")
+            if val is not None:
+                params[key] = val
+        if shared.get("flow_backend") is not None and "backend" not in params:
+            params["backend"] = shared["flow_backend"]
+        if shared.get("flow_inference_resolution") is not None and "inference_resolution" not in params:
+            params["inference_resolution"] = shared["flow_inference_resolution"]
+
     if name == "birefnet_refiner":
         if birefnet_model_dir:
             params["model_path"] = birefnet_model_dir
@@ -128,10 +148,20 @@ def _matte_pass_params(
             "crop_pad",
             "inference_size",
             "hard_mask_dilate",
+            "inference_mode",
+            "refine_foreground",
+            "refine_radius",
+            "precision",
+            "fill_between_keyframes",
         ):
             val = matte.get(key, shared.get(key))
             if val is not None:
                 params[key] = val
+        if shared.get("birefnet_crop_pad") is not None and "crop_pad" not in params:
+            params["crop_pad"] = shared["birefnet_crop_pad"]
+        passes_csv = str(shared.get("passes_csv", ""))
+        if "fill_between_keyframes" not in params and "flow" in passes_csv:
+            params["fill_between_keyframes"] = False
 
     if name == "rvm_refiner":
         for key in ("hard_mask_dilate",):
@@ -143,9 +173,11 @@ def _matte_pass_params(
 
 
 _PLATE_SUFFIXES = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".dpx", ".tga")
+_PLATE_SEARCH_MAX_DEPTH = 14
+_PLATE_SUBDIR_DEPTH = 3
 
 
-def _folder_has_plates(folder: Path) -> bool:
+def _folder_has_plates_flat(folder: Path) -> bool:
     if not folder.is_dir():
         return False
     try:
@@ -157,35 +189,120 @@ def _folder_has_plates(folder: Path) -> bool:
     return False
 
 
+def _resolve_plate_dir_containing_files(
+    folder: Path,
+    *,
+    max_subdir_depth: int = _PLATE_SUBDIR_DEPTH,
+) -> Path | None:
+    """Folder that actually holds numbered plates (may be a child like ``exr/``)."""
+    if not folder.is_dir():
+        return None
+    if _folder_has_plates_flat(folder):
+        return folder.resolve()
+    if max_subdir_depth <= 0:
+        return None
+    try:
+        for child in sorted(folder.iterdir()):
+            if not child.is_dir():
+                continue
+            found = _resolve_plate_dir_containing_files(
+                child, max_subdir_depth=max_subdir_depth - 1
+            )
+            if found is not None:
+                return found
+    except OSError:
+        return None
+    return None
+
+
+def _folder_has_plates(folder: Path) -> bool:
+    return _resolve_plate_dir_containing_files(folder) is not None
+
+
 def _leaf_matches_dir(name: str, leaf: str) -> bool:
     if not leaf:
         return False
     return name == leaf or name.startswith(leaf + "_") or name.startswith(leaf + ".")
 
 
-def _search_under_vda_input(mount: Path, leaf: str, *, max_depth: int = 8) -> list[Path]:
-    """Find plate folders under MyDrive/VDA_input when Desk path omits parents (e.g. LOT_test/)."""
-    vda = mount / "VDA_input"
-    if not vda.is_dir() or not leaf:
+def _name_matches_plate_leaf(folder: Path, plate_dir: Path, leaf: str) -> bool:
+    if not leaf:
+        return True
+    if _leaf_matches_dir(folder.name, leaf) or _leaf_matches_dir(plate_dir.name, leaf):
+        return True
+    try:
+        rel = plate_dir.relative_to(folder)
+        if rel.parts and _leaf_matches_dir(rel.parts[0], leaf):
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def _search_subtree_for_plates(
+    root: Path,
+    leaf: str,
+    *,
+    max_depth: int = _PLATE_SEARCH_MAX_DEPTH,
+) -> list[Path]:
+    """Recursive search under ``root`` for plate sequences (subfolders included)."""
+    if not root.is_dir() or not leaf:
         return []
     matches: list[Path] = []
+    seen: set[str] = set()
 
     def walk(folder: Path, depth: int) -> None:
         if depth > max_depth:
             return
+        plate_dir = _resolve_plate_dir_containing_files(folder)
+        if plate_dir is not None and _name_matches_plate_leaf(folder, plate_dir, leaf):
+            key = str(plate_dir.resolve())
+            if key not in seen:
+                seen.add(key)
+                matches.append(plate_dir.resolve())
         try:
             children = sorted(folder.iterdir())
         except OSError:
             return
         for child in children:
-            if not child.is_dir():
-                continue
-            if _leaf_matches_dir(child.name, leaf) and _folder_has_plates(child):
-                matches.append(child)
-            walk(child, depth + 1)
+            if child.is_dir():
+                walk(child, depth + 1)
 
-    walk(vda, 0)
+    walk(root, 0)
     return matches
+
+
+def _existing_ancestor_dirs(mount: Path, rel: str) -> list[Path]:
+    """Longest existing directory prefixes of ``rel`` (for subtree search anchors)."""
+    rel_path = Path(rel.strip().strip("/").replace("\\", "/"))
+    parts = rel_path.parts
+    anchors: list[Path] = []
+    seen: set[str] = set()
+    for end in range(len(parts), 0, -1):
+        prefix = Path(*parts[:end]) if end else Path(".")
+        candidates: list[Path] = []
+        if end == 0:
+            candidates = [mount / "VDA_input", mount]
+        else:
+            candidates = [mount / prefix]
+            if parts[0] != "VDA_input":
+                candidates.append(mount / "VDA_input" / prefix)
+        for path in candidates:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if path.is_dir():
+                anchors.append(path)
+    return anchors
+
+
+def _search_under_vda_input(mount: Path, leaf: str, *, max_depth: int = _PLATE_SEARCH_MAX_DEPTH) -> list[Path]:
+    """Find plate folders under MyDrive/VDA_input when Desk path omits parents."""
+    vda = mount / "VDA_input"
+    if not vda.is_dir() or not leaf:
+        return []
+    return _search_subtree_for_plates(vda, leaf, max_depth=max_depth)
 
 
 def _pick_best_plate_match(mount: Path, rel_plate: str, matches: list[Path]) -> Path | None:
@@ -244,8 +361,17 @@ def _resolve_plate_dir(mount: Path, rel_plate: str) -> Path | None:
         if key in seen:
             continue
         seen.add(key)
-        if path.is_dir() and _folder_has_plates(path):
-            return path.resolve()
+        if not path.is_dir():
+            continue
+        plate_dir = _resolve_plate_dir_containing_files(path)
+        if plate_dir is not None:
+            if plate_dir != path.resolve():
+                _log.info(
+                    "Plate path %r: using nested folder %s",
+                    rel_plate,
+                    plate_dir.relative_to(mount),
+                )
+            return plate_dir
 
     rel_path = Path(rel)
     parent_rel = rel_path.parent
@@ -264,8 +390,11 @@ def _resolve_plate_dir(mount: Path, rel_plate: str) -> Path | None:
             for child in sorted(parent.iterdir()):
                 if not child.is_dir():
                     continue
-                if _leaf_matches_dir(child.name, leaf) and _folder_has_plates(child):
-                    fuzzy.append(child)
+                if not _leaf_matches_dir(child.name, leaf):
+                    continue
+                plate_dir = _resolve_plate_dir_containing_files(child)
+                if plate_dir is not None:
+                    fuzzy.append(plate_dir)
         except OSError:
             fuzzy = []
         if len(fuzzy) == 1:
@@ -279,19 +408,295 @@ def _resolve_plate_dir(mount: Path, rel_plate: str) -> Path | None:
         if len(fuzzy) > 1:
             return _pick_best_plate_match(mount, rel_plate, fuzzy)
 
+    for anchor in _existing_ancestor_dirs(mount, rel):
+        nested = _search_subtree_for_plates(anchor, leaf)
+        if nested:
+            chosen = _pick_best_plate_match(mount, rel_plate, nested)
+            if chosen is not None:
+                _log.warning(
+                    "Plate path %r not found; resolved under %s -> %s",
+                    rel_plate,
+                    anchor.relative_to(mount),
+                    chosen.relative_to(mount),
+                )
+                return chosen
+
     nested = _search_under_vda_input(mount, leaf)
     if nested:
         return _pick_best_plate_match(mount, rel_plate, nested)
     return None
 
 
-def _format_plate_hint(mount: Path, rel_plate: str) -> str:
+def _normalize_drive_rel_path(rel: str) -> str:
+    p = str(rel or "").strip().replace("\\", "/")
+    for prefix in (
+        "/content/drive/MyDrive/",
+        "/content/drive/My Drive/",
+        "MyDrive/",
+        "My Drive/",
+    ):
+        if p.startswith(prefix):
+            p = p[len(prefix) :]
+    return p.strip("/")
+
+
+def _mount_path_candidates(mount: Path, rel_folder: str) -> list[Path]:
+    """Absolute folder paths to try under the Drive mount."""
+    rel = _normalize_drive_rel_path(rel_folder)
+    if not rel:
+        return []
+    out: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+
+    _add(mount / rel)
+    if rel.startswith("VDA_input/"):
+        inner = rel[len("VDA_input/") :]
+        if inner:
+            _add(mount / "VDA_input" / inner)
+    else:
+        _add(mount / "VDA_input" / rel)
+    return out
+
+
+def _printf_pattern_to_hash(filename_fmt: str) -> str:
+    return re.sub(
+        r"%0(\d+)d",
+        lambda m: "#" * int(m.group(1)),
+        filename_fmt,
+    )
+
+
+def _resolve_plate_from_desk_input_video(
+    mount: Path, seq: dict
+) -> tuple[Path, str, Path] | None:
+    """Locate plates using Desk ``input_video`` + ``first_frame`` (GUI preview paths)."""
+    input_video = str(seq.get("input_video") or "").strip()
+    if not input_video:
+        return None
+    rel = _normalize_drive_rel_path(input_video)
+    folder_rel = str(Path(rel).parent).replace("\\", "/")
+    fname_fmt = Path(rel).name
+    first_frame = int(seq.get("first_frame", 1001))
+    try:
+        first_fname = fname_fmt % first_frame
+    except (TypeError, ValueError):
+        return None
+    pattern = str(seq.get("sequence_pattern") or _printf_pattern_to_hash(fname_fmt))
+    for folder in _mount_path_candidates(mount, folder_rel):
+        if not folder.is_dir():
+            continue
+        for candidate in (folder, _resolve_plate_dir_containing_files(folder)):
+            if candidate is None:
+                continue
+            probe = candidate / first_fname
+            if probe.is_file():
+                return candidate.resolve(), pattern, probe.resolve()
+    return None
+
+
+def _desk_relpath_to_abs(mount: Path, rel: str) -> Path:
+    return (mount / _normalize_drive_rel_path(rel)).resolve()
+
+
+def shot_plate_from_desk_json(
+    mount: Path,
+    seq: dict,
+) -> tuple[Path, str, tuple[int, int], tuple[int, int], float]:
+    """AI Matte: use Desk JSON paths only (no folder search / no path rewriting).
+
+    Requires ``plate_first_frame_relpath`` or ``input_video`` + ``first_frame`` from the
+    Desk prep / Send to Colab flow — same strings as the GUI Colab preview.
+    """
+    first_rel = str(
+        seq.get("plate_first_frame_relpath") or seq.get("plate_first_frame") or ""
+    ).strip()
+    input_pattern = str(
+        seq.get("plate_input_pattern") or seq.get("input_video") or ""
+    ).strip()
+    if not first_rel and input_pattern:
+        rel = _normalize_drive_rel_path(input_pattern)
+        fname_fmt = Path(rel).name
+        first_frame = int(seq.get("first_frame", 1001))
+        try:
+            first_rel = f"{Path(rel).parent}/{fname_fmt % first_frame}".replace("\\", "/")
+        except (TypeError, ValueError) as exc:
+            raise FileNotFoundError(
+                f"Cannot build first frame path from input_video={input_pattern!r}: {exc}"
+            ) from exc
+    if not first_rel:
+        raise FileNotFoundError(
+            "Desk batch missing plate_first_frame_relpath / input_video — re-send from AI Matte Desk"
+        )
+
+    first_path = _desk_relpath_to_abs(mount, first_rel)
+    if not first_path.is_file():
+        last_rel = str(seq.get("plate_last_frame_relpath") or "").strip()
+        lines = [
+            "Desk plate file not found on Colab Drive mount.",
+            f"  mount: {mount}",
+            f"  expected first frame: {first_path}",
+            f"  exists: {first_path.is_file()}",
+        ]
+        if input_pattern:
+            lines.append(f"  plate_input_pattern: {input_pattern!r}")
+        if last_rel:
+            lines.append(f"  plate_last_frame_relpath: {mount / _normalize_drive_rel_path(last_rel)}")
+        lines.append(
+            "  Sync this file to Google Drive (My Drive), then re-run Cell 3."
+        )
+        raise FileNotFoundError("\n".join(lines))
+
+    plate_dir = first_path.parent
+    pattern = str(
+        seq.get("sequence_pattern")
+        or _printf_pattern_to_hash(Path(_normalize_drive_rel_path(input_pattern)).name)
+        if input_pattern
+        else first_path.name
+    )
+    f0 = int(seq.get("first_frame", 1001))
+    f1 = int(seq.get("last_frame", f0))
+
+    try:
+        from live_action_aov.io.oiio_io import read_plate
+
+        pixels, attrs = read_plate(first_path)
+        h, w = pixels.shape[:2]
+        resolution = (w, h)
+        pixel_aspect = float(attrs.get("pixelAspectRatio", 1.0))
+    except Exception as exc:
+        _log.warning("EXR header read failed (%s); continuing with Desk frame range", exc)
+        resolution = (2048, 1152)
+        pixel_aspect = 1.0
+
+    try:
+        _log.info(
+            "Desk plate: %s | pattern=%s | frames=%s-%s",
+            first_path.relative_to(mount),
+            pattern,
+            f0,
+            f1,
+        )
+    except ValueError:
+        _log.info("Desk plate: %s | pattern=%s | frames=%s-%s", first_path, pattern, f0, f1)
+    return plate_dir, pattern, (f0, f1), resolution, pixel_aspect
+
+
+def resolve_plate_for_batch_sequence(
+    mount: Path,
+    seq: dict,
+    sniff_fn: Callable[[Path], tuple[str, tuple[int, int], tuple[int, int], float]],
+) -> tuple[Path, str, tuple[int, int], tuple[int, int], float] | None:
+    """Resolve plate folder + pattern; prefers Desk ``input_video`` over folder-only lookup."""
+    rel_plate = (
+        str(seq.get("plate_folder_drive_relative", "")).strip().strip("/").replace("\\", "/")
+    )
+    desk = _resolve_plate_from_desk_input_video(mount, seq)
+    plate_dir: Path | None = None
+    pattern: str | None = None
+    first_frame_path: Path | None = None
+
+    if desk is not None:
+        plate_dir, pattern, first_frame_path = desk
+        try:
+            _log.info(
+                "Plate from Desk input_video: %s (pattern=%s)",
+                plate_dir.relative_to(mount),
+                pattern,
+            )
+        except ValueError:
+            _log.info("Plate from Desk input_video: %s (pattern=%s)", plate_dir, pattern)
+    if plate_dir is None:
+        plate_dir = _resolve_plate_dir(mount, rel_plate)
+
+    if plate_dir is None:
+        return None
+
+    if pattern is None or first_frame_path is None:
+        try:
+            pattern, sniffed_range, resolution, pixel_aspect = sniff_fn(plate_dir)
+        except FileNotFoundError:
+            return None
+    else:
+        sniffed_range = (
+            int(seq.get("first_frame", 1001)),
+            int(seq.get("last_frame", 1100)),
+        )
+        try:
+            from live_action_aov.io.oiio_io import read_plate
+
+            pixels, attrs = read_plate(first_frame_path)
+            h, w = pixels.shape[:2]
+            resolution = (w, h)
+            pixel_aspect = float(attrs.get("pixelAspectRatio", 1.0))
+        except Exception as exc:
+            _log.warning(
+                "Desk first frame %s found; EXR header read failed (%s) — using job frames",
+                first_frame_path.name,
+                exc,
+            )
+            resolution = (2048, 1152)
+            pixel_aspect = 1.0
+
+    j0 = int(seq.get("first_frame", sniffed_range[0]))
+    j1 = int(seq.get("last_frame", sniffed_range[1]))
+    s0, s1 = sniffed_range
+    f0, f1 = max(s0, j0), min(s1, j1)
+    if f0 > f1:
+        f0, f1 = j0, j1
+    return plate_dir, pattern, (f0, f1), resolution, pixel_aspect
+
+
+def _format_plate_hint(mount: Path, rel_plate: str, seq: dict | None = None) -> str:
     lines = [f"  mount: {mount}", f"  plate_folder_drive_relative: {rel_plate!r}"]
+    if seq:
+        iv = seq.get("input_video")
+        if iv:
+            lines.append(f"  input_video (Desk): {iv!r}")
+            rel = _normalize_drive_rel_path(str(iv))
+            first = int(seq.get("first_frame", 1001))
+            try:
+                first_name = Path(rel).name % first
+            except (TypeError, ValueError):
+                first_name = None
+            if first_name:
+                lines.append("  Desk first-frame probes:")
+                folder_rel = str(Path(rel).parent)
+                for folder in _mount_path_candidates(mount, folder_rel):
+                    probe = folder / first_name
+                    lines.append(
+                        f"    - {probe}  exists={probe.is_file()}"
+                    )
     rel = rel_plate.strip().strip("/")
     lines.append("  tried:")
     for p in (mount / rel, mount / "VDA_input" / rel):
-        lines.append(f"    - {p}  exists={p.exists()} dir={p.is_dir()}")
+        plate = _resolve_plate_dir_containing_files(p) if p.is_dir() else None
+        lines.append(
+            f"    - {p}  exists={p.exists()} dir={p.is_dir()} plates={plate is not None}"
+        )
     rel_path = Path(rel)
+    leaf = rel_path.name
+    anchors = _existing_ancestor_dirs(mount, rel)
+    if anchors:
+        lines.append("  existing path prefixes (searched recursively):")
+        for a in anchors[:6]:
+            lines.append(f"    - {a.relative_to(mount)}")
+    if leaf:
+        hits = _search_under_vda_input(mount, leaf)
+        if hits:
+            lines.append(f"  matches under VDA_input/ for leaf {leaf!r}:")
+            for h in hits[:8]:
+                lines.append(f"    - {h.relative_to(mount)}")
+        else:
+            lines.append(
+                f"  no plate sequence found under VDA_input/ for leaf {leaf!r} "
+                f"(searched subfolders depth {_PLATE_SEARCH_MAX_DEPTH})"
+            )
     parent = mount / rel_path.parent
     if parent.is_dir():
         try:
@@ -306,6 +711,9 @@ def _format_plate_hint(mount: Path, rel_plate: str) -> str:
             lines.append(f"  VDA_input/ (first entries): {kids}")
         except OSError:
             pass
+    lines.append(
+        "  tip: refresh sequence paths in Desk (Drive folder_id) or fix plate_folder_drive_relative"
+    )
     return "\n".join(lines)
 
 
@@ -410,10 +818,14 @@ def _main_impl() -> int:
             _log.error("Sequence missing plate_folder_drive_relative")
             return 1
 
-        plate_dir = _resolve_plate_dir(mount, rel_plate)
-        if plate_dir is None:
-            _log.error("Plate folder not found.\n%s", _format_plate_hint(mount, rel_plate))
+        resolved = resolve_plate_for_batch_sequence(mount, seq, _sniff_sequence)
+        if resolved is None:
+            _log.error(
+                "Plate folder not found.\n%s",
+                _format_plate_hint(mount, rel_plate, seq),
+            )
             return 1
+        plate_dir, pattern, (f0, f1), resolution, pixel_aspect = resolved
 
         output_dir: Path | None
         if rel_side:
@@ -424,27 +836,6 @@ def _main_impl() -> int:
             output_dir.mkdir(parents=True, exist_ok=True)
         else:
             output_dir = None
-
-        try:
-            pattern, sniffed_range, resolution, pixel_aspect = _sniff_sequence(plate_dir)
-        except FileNotFoundError as exc:
-            _log.error("No plate sequence in %s: %s", plate_dir, exc)
-            return 1
-
-        j0 = int(seq.get("first_frame", sniffed_range[0]))
-        j1 = int(seq.get("last_frame", sniffed_range[1]))
-        s0, s1 = sniffed_range
-        f0 = max(s0, j0)
-        f1 = min(s1, j1)
-        if f0 > f1:
-            _log.warning(
-                "Job frame range %s-%s outside sniffed %s-%s; using sniffed.",
-                j0,
-                j1,
-                s0,
-                s1,
-            )
-            f0, f1 = s0, s1
 
         _log.info(
             "Shot %s: plate=%s pattern=%s frames=%s-%s output=%s layout=%s",

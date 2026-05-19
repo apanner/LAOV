@@ -127,6 +127,33 @@ def _wrap_if_gated_repo(repo: str, exc: BaseException) -> RuntimeError | None:
     )
 
 
+def _patch_sam3_transformers_compat() -> None:
+    """SAM3 tracker vs vision encoder field-name drift in some transformers builds.
+
+    Tracker ``_prepare_vision_features`` reads ``fpn_position_embeddings``;
+    ``Sam3VisionEncoderOutput`` exposes ``fpn_position_encoding`` (fixed upstream
+    in huggingface/transformers#43487). Alias on the output class so both work.
+    """
+    try:
+        from transformers.models.sam3.modeling_sam3 import Sam3VisionEncoderOutput
+    except ImportError:
+        return
+    if getattr(Sam3VisionEncoderOutput, "_laov_fpn_alias_patch", False):
+        return
+    fields = getattr(Sam3VisionEncoderOutput, "__dataclass_fields__", {})
+    if "fpn_position_embeddings" in fields:
+        Sam3VisionEncoderOutput._laov_fpn_alias_patch = True
+        return
+    if not hasattr(Sam3VisionEncoderOutput, "fpn_position_encoding"):
+        return
+
+    # property alias — safe for dataclass ModelOutput instances
+    Sam3VisionEncoderOutput.fpn_position_embeddings = property(  # type: ignore[attr-defined]
+        lambda self: self.fpn_position_encoding
+    )
+    Sam3VisionEncoderOutput._laov_fpn_alias_patch = True
+
+
 @dataclass
 class _DetectedInstance:
     """Internal scratch structure — one detected + tracked instance.
@@ -241,6 +268,7 @@ class SAM3MattePass(UtilityPass):
         """
         if self._model is not None:
             return
+        _patch_sam3_transformers_compat()
         import torch
         from transformers import (
             Sam3Model,

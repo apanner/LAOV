@@ -32,13 +32,17 @@ import laov_colab_run as lcr  # noqa: E402
 _log = logging.getLogger("ai_matte_colab_run")
 
 AI_MATTE_DEFAULTS = {
-    "passes_csv": "matte",
+    "passes_csv": "flow,matte",
     "matte_detector": "sam3_matte",
     "refiner": "birefnet_refiner",
     "display_transform": True,
     "output_layout": "split_folders",
     "matte_mode": "people_fg",
     "matte_concepts": ["person"],
+    "fill_between_keyframes": False,
+    "flow_backend": "raft_large",
+    "flow_inference_resolution": 520,
+    "matte_temporal_ema": 0.25,
 }
 
 
@@ -57,6 +61,24 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _ai_matte_post_configs(shared: dict) -> list:
+    from live_action_aov.core.job import PostConfig
+
+    stride = int(shared.get("keyframe_stride", 4))
+    fb = shared.get("flow_fb_threshold_px", shared.get("fb_threshold_px", 1.0))
+    return [
+        PostConfig(
+            name="matte_flow_temporal",
+            params={
+                "keyframe_stride": stride,
+                "fb_threshold_px": fb,
+                "blend_forward_backward": shared.get("matte_flow_blend", 0.5),
+                "final_ema_alpha": shared.get("matte_temporal_ema", 0.25),
+            },
+        ),
+    ]
+
+
 def _merge_shared_defaults(shared: dict) -> dict:
     out = dict(shared)
     for key, val in AI_MATTE_DEFAULTS.items():
@@ -72,9 +94,12 @@ def _verify_registry(refiner: str) -> int:
         from live_action_aov.core.registry import get_registry
 
         reg = get_registry()
-        for name in ("sam3_matte", refiner):
+        reg.load_all()
+        for name in ("flow", "sam3_matte", refiner):
             reg.get_pass(name)
-        _log.info("Registry OK: sam3_matte + %s", refiner)
+        if "matte_flow_temporal" not in reg._post:
+            raise KeyError("matte_flow_temporal post-processor")
+        _log.info("Registry OK: flow + sam3_matte + %s + matte_flow_temporal", refiner)
         return 0
     except KeyError as exc:
         _log.error(
@@ -195,7 +220,7 @@ def _run_sequences(
     probe_first_frame: bool,
 ) -> int:
     from live_action_aov.cli.app import _resolve_semantic_passes, _sniff_sequence
-    from live_action_aov.core.job import Job, PassConfig, Shot
+    from live_action_aov.core.job import Job, PassConfig, PostConfig, Shot
     from live_action_aov.core.registry import get_registry
     from live_action_aov import run as laov_run
 
@@ -230,16 +255,15 @@ def _run_sequences(
 
     any_failed = False
     for seq in sequences:
-        rel_plate = str(seq.get("plate_folder_drive_relative", "")).strip().strip("/").replace("\\", "/")
         rel_side = str(seq.get("sidecar_output_drive_subpath", "")).strip().strip("/").replace("\\", "/")
         shot_name = str(seq.get("shot_name", "shot"))
-        if not rel_plate:
-            _log.error("Sequence missing plate_folder_drive_relative")
-            return 1
 
-        plate_dir = lcr._resolve_plate_dir(mount, rel_plate)
-        if plate_dir is None:
-            _log.error("Plate folder not found.\n%s", lcr._format_plate_hint(mount, rel_plate))
+        try:
+            plate_dir, pattern, (f0, f1), resolution, pixel_aspect = lcr.shot_plate_from_desk_json(
+                mount, seq
+            )
+        except FileNotFoundError as exc:
+            _log.error("%s", exc)
             return 1
 
         if rel_side:
@@ -250,19 +274,6 @@ def _run_sequences(
             output_dir.mkdir(parents=True, exist_ok=True)
         else:
             output_dir = None
-
-        try:
-            pattern, sniffed_range, resolution, pixel_aspect = _sniff_sequence(plate_dir)
-        except FileNotFoundError as exc:
-            _log.error("No plate sequence in %s: %s", plate_dir, exc)
-            return 1
-
-        j0 = int(seq.get("first_frame", sniffed_range[0]))
-        j1 = int(seq.get("last_frame", sniffed_range[1]))
-        s0, s1 = sniffed_range
-        f0, f1 = max(s0, j0), min(s1, j1)
-        if f0 > f1:
-            f0, f1 = s0, s1
 
         matte_cfg = seq.get("matte_config") or {}
         _log.info(
@@ -306,7 +317,10 @@ def _run_sequences(
             )
             for name in pass_names
         ]
-        job = Job(shot=shot, passes=pass_configs)
+        post_configs: list[PostConfig] = _ai_matte_post_configs(shared)
+        if "flow" not in pass_names:
+            post_configs = []
+        job = Job(shot=shot, passes=pass_configs, post=post_configs)
         try:
             laov_run(job)
         except Exception:
