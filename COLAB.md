@@ -135,6 +135,14 @@ MyDrive/VDA_models/ZhengPeng7/BiRefNet/model.safetensors
 
 Verify: `python scripts/download_birefnet_for_drive.py --verify-only`
 
+**Colab dependency:** BiRefNet’s Hugging Face modeling code requires **`kornia`**. `scripts/colab_setup.py` installs it automatically. If you see `No module named 'kornia'` after an older setup cell, run:
+
+```bash
+pip install -q "kornia>=0.7"
+```
+
+or re-run `python scripts/colab_setup.py --full` after `git pull`.
+
 ## SAM3 + transformers on Colab
 
 If SAM3 tracking fails with ``fpn_position_embeddings``, upgrade transformers then re-run Cell 2 setup:

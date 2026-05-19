@@ -15,9 +15,11 @@ Expects batch JSON from ``google_desk_app`` (model_type ``AI_MATTE_STANDALONE``)
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -77,6 +79,17 @@ def _ai_matte_post_configs(shared: dict) -> list:
             },
         ),
     ]
+
+
+def _ensure_birefnet_colab_deps() -> None:
+    """BiRefNet HF snapshot modeling imports kornia (not always on Colab by default)."""
+    if importlib.util.find_spec("kornia") is not None:
+        return
+    _log.info("Installing kornia for BiRefNet (pip install kornia>=0.7)...")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "kornia>=0.7"],
+        check=True,
+    )
 
 
 def _merge_shared_defaults(shared: dict) -> dict:
@@ -154,6 +167,13 @@ def main() -> int:
     matte_detector = str(shared.get("matte_detector", "sam3_matte"))
     refiner = str(shared.get("refiner", "birefnet_refiner"))
     _log.info("AI Matte batch — detector=%s refiner=%s passes=%s", matte_detector, refiner, shared.get("passes_csv"))
+
+    if refiner == "birefnet_refiner":
+        try:
+            _ensure_birefnet_colab_deps()
+        except subprocess.CalledProcessError as exc:
+            _log.error("Failed to install kornia for BiRefNet: %s", exc)
+            return 1
 
     try:
         from live_action_aov.io.oiio_io import require_oiio

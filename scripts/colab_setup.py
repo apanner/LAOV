@@ -33,6 +33,7 @@ COLAB_PIP_DEPS: tuple[str, ...] = (
     "scipy>=1.11",
     "einops>=0.4",
     "easydict>=1.10",
+    "kornia>=0.7",
 )
 
 # import_name -> pip spec (for post-install import verification)
@@ -47,6 +48,7 @@ VERIFY_IMPORTS: dict[str, str] = {
     "PIL": "Pillow",
     "geffnet": "geffnet>=1.0",
     "cv2": "opencv-python-headless>=4.8",
+    "kornia": "kornia>=0.7",
     "numpy": "numpy",
     "torch": "torch",
     "torchvision": "torchvision",

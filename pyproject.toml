@@ -80,6 +80,8 @@ depthpro = []
 # `trust_remote_code=True`. Extra reserved for future pinning of any extra
 # deps (e.g. sam3's own preprocessor package) without a release bump.
 sam3 = []
+# BiRefNet HF modeling code imports kornia (dynamic module from Drive snapshot).
+birefnet = ["kornia>=0.7"]
 # RVM loads via `torch.hub.load('PeterL1n/RobustVideoMatting', ...)` — torch
 # is already core. Extra kept for discoverability.
 rvm = []
@@ -90,7 +92,7 @@ dsine = ["geffnet>=1.0"]
 matanyone2 = []
 # `matte` meta-extra — installs both the detector (sam3) and the default
 # commercial-safe refiner (rvm) in one shot.
-matte = ["live-action-aov[sam3]", "live-action-aov[rvm]"]
+matte = ["live-action-aov[sam3]", "live-action-aov[rvm]", "live-action-aov[birefnet]"]
 # `all` meta-extra — every optional pass's dependencies. This is what
 # install.bat / install.sh default to; without it, users pick a
 # non-default backend in the GUI's Passes tab and hit "module not
@@ -107,6 +109,7 @@ all = [
     "live-action-aov[dsine]",
     "live-action-aov[sam3]",
     "live-action-aov[rvm]",
+    "live-action-aov[birefnet]",
 ]
 
 [project.urls]
