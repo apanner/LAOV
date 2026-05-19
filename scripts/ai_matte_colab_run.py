@@ -45,7 +45,14 @@ AI_MATTE_DEFAULTS = {
     "fill_between_keyframes": False,
     "flow_backend": "raft_large",
     "flow_inference_resolution": 520,
-    "matte_temporal_ema": 0.25,
+    "matte_temporal_ema": 0.15,
+    "propagation_mode": "nearest_anchor",
+    "export_sam3_exr": True,
+    "export_birefnet_exr": True,
+    "export_vitmatte_exr": False,
+    "export_final_exr": True,
+    "export_flow_exr": True,
+    "qc_mp4": True,
 }
 
 
@@ -64,19 +71,56 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _build_ai_matte_pass_names(shared: dict) -> list[str]:
+    """Expand flow + SAM3 + optional refiner passes for stage exports."""
+    refiner = str(shared.get("refiner", "birefnet_refiner"))
+    names = ["sam3_matte"]
+    if shared.get("export_flow_exr", True):
+        names.insert(0, "flow")
+    run_birefnet = bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner"
+    run_vitmatte = bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner"
+    if run_birefnet and "birefnet_refiner" not in names:
+        names.append("birefnet_refiner")
+    if run_vitmatte and "vitmatte_refiner" not in names:
+        names.append("vitmatte_refiner")
+    if refiner == "rvm_refiner" and "rvm_refiner" not in names:
+        names.append("rvm_refiner")
+    return names
+
+
+def _stage_export_map(shared: dict) -> dict[str, str]:
+    exports: dict[str, str] = {}
+    if shared.get("export_sam3_exr", True):
+        exports["sam3_matte"] = "matte_sam3"
+    if shared.get("export_birefnet_exr", True):
+        exports["birefnet_refiner"] = "matte_birefnet"
+    if shared.get("export_vitmatte_exr", False):
+        exports["vitmatte_refiner"] = "matte_vitmatte"
+    return exports
+
+
 def _ai_matte_post_configs(shared: dict) -> list:
     from live_action_aov.core.job import PostConfig
+    from live_action_aov.io.channels import MATTE_CHANNELS
 
     stride = int(shared.get("keyframe_stride", 4))
     fb = shared.get("flow_fb_threshold_px", shared.get("fb_threshold_px", 1.0))
+    refiner = str(shared.get("refiner", "birefnet_refiner"))
+    applied = list(MATTE_CHANNELS)
+    if refiner == "vitmatte_refiner":
+        from live_action_aov.passes.matte.vitmatte_refiner import VITMATTE_CHANNELS
+
+        applied = list(VITMATTE_CHANNELS)
     return [
         PostConfig(
             name="matte_flow_temporal",
             params={
+                "applied_to": applied,
                 "keyframe_stride": stride,
                 "fb_threshold_px": fb,
+                "propagation_mode": shared.get("propagation_mode", "nearest_anchor"),
                 "blend_forward_backward": shared.get("matte_flow_blend", 0.5),
-                "final_ema_alpha": shared.get("matte_temporal_ema", 0.25),
+                "final_ema_alpha": shared.get("matte_temporal_ema", 0.15),
             },
         ),
     ]
@@ -103,17 +147,17 @@ def _merge_shared_defaults(shared: dict) -> dict:
     return out
 
 
-def _verify_registry(refiner: str) -> int:
+def _verify_registry(pass_names: list[str]) -> int:
     try:
         from live_action_aov.core.registry import get_registry
 
         reg = get_registry()
         reg.load_all()
-        for name in ("flow", "sam3_matte", refiner):
+        for name in pass_names:
             reg.get_pass(name)
         if "matte_flow_temporal" not in reg._post:
             raise KeyError("matte_flow_temporal post-processor")
-        _log.info("Registry OK: flow + sam3_matte + %s + matte_flow_temporal", refiner)
+        _log.info("Registry OK: %s + matte_flow_temporal", ", ".join(pass_names))
         return 0
     except KeyError as exc:
         _log.error(
@@ -169,7 +213,9 @@ def main() -> int:
     refiner = str(shared.get("refiner", "birefnet_refiner"))
     _log.info("AI Matte batch — detector=%s refiner=%s passes=%s", matte_detector, refiner, shared.get("passes_csv"))
 
-    if refiner == "birefnet_refiner":
+    pass_names_preview = _build_ai_matte_pass_names(shared)
+
+    if "birefnet_refiner" in pass_names_preview:
         try:
             _ensure_birefnet_colab_deps()
         except subprocess.CalledProcessError as exc:
@@ -184,7 +230,7 @@ def main() -> int:
         _log.error("OpenImageIO required for plate read: %s", exc)
         return 1
 
-    if _verify_registry(refiner) != 0:
+    if _verify_registry(pass_names_preview) != 0:
         return 1
 
     mount = lcr._drive_mount()
@@ -241,13 +287,10 @@ def _run_sequences(
     probe_first_frame: bool,
     status: ColabRunStatus | None = None,
 ) -> int:
-    from live_action_aov.cli.app import _resolve_semantic_passes, _sniff_sequence
     from live_action_aov.core.job import Job, PassConfig, PostConfig, Shot
     from live_action_aov.core.registry import get_registry
     from live_action_aov import run as laov_run
 
-    passes_csv = str(shared.get("passes_csv", "matte"))
-    raw_names = [x.strip() for x in passes_csv.split(",") if x.strip()]
     allow_nc = bool(shared.get("allow_noncommercial", False))
     display_transform = bool(shared.get("display_transform", True))
     colorspace = shared.get("colorspace")
@@ -256,13 +299,8 @@ def _run_sequences(
     proxy_long_edge = int(proxy_raw) if proxy_raw is not None else None
     output_layout = str(shared.get("output_layout", "split_folders"))
 
-    pass_names = _resolve_semantic_passes(
-        raw_names,
-        depth_backend="depth_anything_v2",
-        normals_backend="dsine",
-        matte_detector=matte_detector,
-        refiner=refiner,
-    )
+    pass_names = _build_ai_matte_pass_names(shared)
+    stage_exports = _stage_export_map(shared)
     registry = get_registry()
     for name in pass_names:
         lic = registry.get_pass(name).declared_license()
@@ -274,18 +312,27 @@ def _run_sequences(
     date_folder = str(os.environ.get("LAOV_RUNTIME_DATE_FOLDER", "")).strip().strip("/")
     sam3_model_dir = lcr._resolve_sam3_model_dir(mount, shared)
     birefnet_model_dir = lcr._resolve_birefnet_model_dir(mount, shared)
+    vitmatte_model_dir = lcr._resolve_vitmatte_model_dir(mount, shared)
 
     any_failed = False
-    for seq in sequences:
+    shot_total = len(sequences)
+    for shot_idx, seq in enumerate(sequences):
         rel_side = str(seq.get("sidecar_output_drive_subpath", "")).strip().strip("/").replace("\\", "/")
         shot_name = str(seq.get("shot_name", "shot"))
+        if status:
+            status.shot_begin(shot_name, shot_idx + 1, shot_total)
 
         try:
+            if status:
+                status.stage(f"{shot_name}: plate preflight", shot_name=shot_name)
             plate_dir, pattern, (f0, f1), resolution, pixel_aspect = lcr.shot_plate_from_desk_json(
                 mount, seq
             )
         except FileNotFoundError as exc:
             _log.error("%s", exc)
+            if status:
+                status.shot_end(shot_name, ok=False, message="plate preflight failed")
+                status.finish_run(ok=False)
             return 1
 
         if rel_side:
@@ -325,7 +372,10 @@ def _run_sequences(
             output_dir=output_dir,
             proxy_long_edge=proxy_long_edge,
             output_layout=output_layout,  # type: ignore[arg-type]
+            pass_export_subdirs=stage_exports,
         )
+        if vitmatte_model_dir:
+            os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vitmatte_model_dir
         pass_configs = [
             PassConfig(
                 name=name,
@@ -339,9 +389,9 @@ def _run_sequences(
             )
             for name in pass_names
         ]
-        post_configs: list[PostConfig] = _ai_matte_post_configs(shared)
-        if "flow" not in pass_names:
-            post_configs = []
+        post_configs: list[PostConfig] = []
+        if "flow" in pass_names and shared.get("export_final_exr", True):
+            post_configs = _ai_matte_post_configs(shared)
         job = Job(shot=shot, passes=pass_configs, post=post_configs)
         progress_cb = (
             status.make_laov_callback(shot_name, shot_idx, shot_total) if status else None
@@ -349,7 +399,7 @@ def _run_sequences(
         try:
             if status:
                 status.stage(
-                    f"{shot_name}: engine — passes {passes_csv}",
+                    f"{shot_name}: engine — {', '.join(pass_names)}",
                     shot_name=shot_name,
                 )
             laov_run(job, progress_callback=progress_cb)
@@ -373,15 +423,16 @@ def _run_sequences(
                 try:
                     if status:
                         status.stage(f"{shot_name}: QC MP4 export", shot_name=shot_name)
-                    from ai_matte_qc_mp4 import export_ai_matte_qc_mp4s
+                    from ai_matte_qc_mp4 import export_all_stage_qc_mp4s
 
                     fps = float(shared.get("fps") or shared.get("frame_rate") or 24.0)
-                    export_ai_matte_qc_mp4s(
+                    export_all_stage_qc_mp4s(
                         output_dir,
                         plate_dir=plate_dir,
                         sequence_pattern=pattern,
                         frame_range=(f0, f1),
                         fps=fps,
+                        refiner=refiner,
                     )
                 except Exception as exc:
                     _log.warning("QC MP4 export failed for %s: %s", shot_name, exc)

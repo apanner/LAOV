@@ -90,6 +90,26 @@ def _resolve_birefnet_model_dir(mount: Path, shared: dict) -> str | None:
     return None
 
 
+def _resolve_vitmatte_model_dir(mount: Path, shared: dict) -> str | None:
+    explicit = shared.get("vitmatte_model_path") or os.environ.get("AI_MATTE_VITMATTE_MODEL_PATH")
+    if explicit:
+        p = Path(str(explicit).strip().replace("\\", "/"))
+        if not p.is_absolute():
+            p = mount / str(p).strip().strip("/")
+        if p.is_dir() and (p / "config.json").is_file():
+            return str(p.resolve())
+    for rel in (
+        "VDA_models/hustvl/vitmatte-small-composition-1k",
+        "VDA_models/vitmatte",
+        "VDA_model/vitmatte",
+    ):
+        candidate = mount / rel
+        if candidate.is_dir() and (candidate / "config.json").is_file():
+            _log.info("Using Drive ViTMatte snapshot: %s", candidate)
+            return str(candidate.resolve())
+    return None
+
+
 def _matte_pass_params(
     name: str,
     shared: dict,
@@ -163,6 +183,15 @@ def _matte_pass_params(
         passes_csv = str(shared.get("passes_csv", ""))
         if "fill_between_keyframes" not in params and "flow" in passes_csv:
             params["fill_between_keyframes"] = False
+
+    if name == "vitmatte_refiner":
+        vit_dir = os.environ.get("AI_MATTE_VITMATTE_MODEL_PATH")
+        if vit_dir:
+            params["model_path"] = vit_dir
+        for key in ("keyframe_stride", "hard_mask_dilate", "precision"):
+            val = matte.get(key, shared.get(key))
+            if val is not None:
+                params[key] = val
 
     if name == "rvm_refiner":
         for key in ("hard_mask_dilate",):

@@ -19,7 +19,7 @@ from live_action_aov.io.channels import (
 
 OutputLayout = Literal["combined", "split_folders"]
 
-SPLIT_FOLDER_NAMES: tuple[str, ...] = ("depth", "normals", "flow", "matte")
+SPLIT_FOLDER_NAMES: tuple[str, ...] = ("depth", "normals", "flow", "matte", "vitmatte")
 
 _DEPTH = frozenset(DEPTH_CHANNELS) | frozenset(POSITION_CHANNELS)
 _NORMALS = frozenset(NORMAL_CHANNELS) | frozenset(AO_CHANNELS)
@@ -31,7 +31,9 @@ def categorize_channels(channels: dict[str, np.ndarray]) -> dict[str, dict[str, 
     """Bucket per-frame channels into depth / normals / flow / matte folders."""
     out: dict[str, dict[str, np.ndarray]] = {name: {} for name in SPLIT_FOLDER_NAMES}
     for name, arr in channels.items():
-        if is_mask_channel(name) or name in _MATTE:
+        if name.startswith("vitmatte."):
+            out["vitmatte"][name] = arr
+        elif is_mask_channel(name) or name in _MATTE:
             out["matte"][name] = arr
         elif name in _FLOW:
             out["flow"][name] = arr

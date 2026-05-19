@@ -41,6 +41,9 @@ class MatteFlowTemporal:
         "applied_to": list(MATTE_CHANNELS),
         "keyframe_stride": 4,
         "fb_threshold_px": 1.0,
+        # ``nearest_anchor`` avoids ghost/double mattes from averaging misaligned
+        # forward + backward warps. ``blend`` keeps legacy 50/50 mix.
+        "propagation_mode": "nearest_anchor",
         "blend_forward_backward": 0.5,
         "final_ema_alpha": 0.25,
     }
@@ -77,6 +80,7 @@ class MatteFlowTemporal:
         stride = max(1, int(self.params.get("keyframe_stride", 4)))
         threshold = float(self.params["fb_threshold_px"])
         blend_fb = float(self.params.get("blend_forward_backward", 0.5))
+        prop_mode = str(self.params.get("propagation_mode", "nearest_anchor")).strip().lower()
         ema_alpha = float(self.params.get("final_ema_alpha", 0.0))
 
         key_indices = _keyframe_frame_numbers(frames, stride)
@@ -133,11 +137,19 @@ class MatteFlowTemporal:
                     out[f][ch_name] = ba.astype(np.float32, copy=False)  # type: ignore[union-attr]
                 elif ba is None:
                     out[f][ch_name] = fa.astype(np.float32, copy=False)
-                else:
+                elif prop_mode == "blend":
                     mixed = (1.0 - w) * fa + w * ba
                     if blend_fb != 0.5:
                         mixed = (1.0 - blend_fb) * fa + blend_fb * ba
                     out[f][ch_name] = mixed.astype(np.float32, copy=False)
+                else:
+                    # Use the warp from the nearer keyframe only (reduces double-image ghosts).
+                    dist_prev = f - prev_k
+                    dist_next = next_k - f
+                    if dist_prev <= dist_next:
+                        out[f][ch_name] = fa.astype(np.float32, copy=False)
+                    else:
+                        out[f][ch_name] = ba.astype(np.float32, copy=False)
 
         if ema_alpha > 0.0:
             smoother = TemporalSmoother(

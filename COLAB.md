@@ -108,9 +108,12 @@ Default Desk layout (`output_folder_path` is usually `VDA_output`, date from Col
 
 ```text
 MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
-  matte/           # EXR sidecars (see below)
-  flow/            # RAFT motion — NOT a matte (used to fill between BiRefNet keyframes)
-  qc/              # QC MP4 previews (after run, if qc_mp4 is true)
+  matte_sam3/      # SAM3 only — mask.<concept> EXRs
+  matte_birefnet/  # BiRefNet keyframes only — matte.r/g/b/a (before temporal)
+  matte_vitmatte/  # ViTMatte keyframes — vitmatte.r/g/b/a (optional, trimap from SAM3)
+  matte/           # Final temporal matte (BiRefNet + RAFT fill) when enabled in Desk
+  flow/            # RAFT motion (optional; not a matte)
+  qc/              # MP4 per stage (*_sam3_*, *_birefnet_*, *_final_*, …)
   laov_run.log
 ```
 

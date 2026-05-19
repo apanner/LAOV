@@ -82,6 +82,7 @@ depthpro = []
 sam3 = []
 # BiRefNet HF modeling code imports kornia (dynamic module from Drive snapshot).
 birefnet = ["kornia>=0.7"]
+vitmatte = []
 # RVM loads via `torch.hub.load('PeterL1n/RobustVideoMatting', ...)` — torch
 # is already core. Extra kept for discoverability.
 rvm = []
@@ -139,6 +140,7 @@ normalcrafter      = "live_action_aov.passes.normals.normalcrafter:NormalCrafter
 sam3_matte         = "live_action_aov.passes.matte.sam3:SAM3MattePass"
 rvm_refiner        = "live_action_aov.passes.matte.rvm:RVMRefinerPass"
 birefnet_refiner   = "live_action_aov.passes.matte.birefnet:BiRefNetRefinerPass"
+vitmatte_refiner   = "live_action_aov.passes.matte.vitmatte_refiner:ViTMatteRefinerPass"
 matanyone2         = "live_action_aov.passes.matte.matanyone2:MatAnyone2RefinerPass"
 
 [project.entry-points."live_action_aov.post"]

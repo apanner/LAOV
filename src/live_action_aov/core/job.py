@@ -105,6 +105,10 @@ class Shot(BaseModel):
     # ``split_folders`` = ``depth/``, ``normals/``, ``flow/``, ``matte/`` per frame.
     output_layout: Literal["combined", "split_folders"] = "combined"
 
+    # AI Matte: after each pass name, write filtered EXRs to a subfolder under output_dir.
+    # Example: {"sam3_matte": "matte_sam3", "birefnet_refiner": "matte_birefnet"}.
+    pass_export_subdirs: dict[str, str] = Field(default_factory=dict)
+
     status: ShotStatus = "new"
     notes: str = ""
 
