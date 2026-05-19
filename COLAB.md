@@ -115,6 +115,14 @@ MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_0
 
 See `colab_ai/README.md`.
 
+### Live progress (Colab + Desk)
+
+While `ai_matte_colab_run.py` runs, it prints flushed **`[AI_MATTE]`** lines (stage + percent) and updates:
+
+`MyDrive/VDA_Jobs/status/{job_id}_status.json`
+
+Fields include `current_stage`, `progress_percent`, `current_shot`, and per-shot `sequences[].status` (`pending` → `running` → `success` / `failed`). Refresh that file in Drive or enable Desk job monitoring to see progress during long SAM3 / BiRefNet passes.
+
 ## BiRefNet on Google Drive (no Colab login)
 
 Download **once** (public model, no HF license gate):
