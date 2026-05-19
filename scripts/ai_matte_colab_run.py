@@ -76,11 +76,13 @@ def _build_ai_matte_pass_names(shared: dict) -> list[str]:
     """Expand flow + SAM3 + optional refiner passes for stage exports."""
     refiner = str(shared.get("refiner", "birefnet_refiner"))
     names = ["sam3_matte"]
-    need_flow = bool(shared.get("export_flow_exr", False)) or bool(
-        shared.get("run_matte_flow_temporal", False)
-    )
-    if refiner != "vitmatte_refiner" and bool(shared.get("export_final_exr", False)):
-        need_flow = need_flow or bool(shared.get("run_matte_flow_temporal", True))
+    need_flow = bool(shared.get("export_flow_exr", False))
+    if bool(shared.get("run_matte_flow_temporal", False)) and bool(
+        shared.get("export_final_exr", False)
+    ):
+        need_flow = True
+    if refiner == "vitmatte_refiner":
+        need_flow = bool(shared.get("export_flow_exr", False))
     if need_flow:
         names.insert(0, "flow")
     run_birefnet = bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner"
