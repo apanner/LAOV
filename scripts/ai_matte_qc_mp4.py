@@ -21,31 +21,29 @@ STAGE_DIRS: tuple[tuple[str, str, str], ...] = (
     ("vitmatte", "final_vitmatte", "rgba"),
 )
 
-_RGBA_SLOT_RE = re.compile(r"_matte_([rgba])\.(\d+)\.exr$", re.IGNORECASE)
+_COMBINED_MATTE_RE = re.compile(
+    r"_(sam3_matte|birefnet_matte|vitmatte_matte|matte)\.(\d+)\.exr$",
+    re.IGNORECASE,
+)
 
 
 def _sorted_exrs(folder: Path) -> list[tuple[int, Path]]:
     if not folder.is_dir():
         return []
-    rgba = _sorted_rgba_slot_exrs(folder, slot="r")
-    if rgba:
-        return rgba
     found: list[tuple[int, Path]] = []
     for path in sorted(folder.glob("*.exr")):
+        m = _COMBINED_MATTE_RE.search(path.name)
+        if m:
+            found.append((int(m.group(2)), path))
+            continue
         m = _FRAME_RE.search(path.name)
         if m:
             found.append((int(m.group(1)), path))
-    return sorted(found, key=lambda x: x[0])
-
-
-def _sorted_rgba_slot_exrs(folder: Path, *, slot: str = "r") -> list[tuple[int, Path]]:
-    """One EXR per frame for a hero slot (RGBA deliverables)."""
-    found: list[tuple[int, Path]] = []
-    for path in sorted(folder.glob("*.exr")):
-        m = _RGBA_SLOT_RE.search(path.name)
-        if m and m.group(1).lower() == slot.lower():
-            found.append((int(m.group(2)), path))
-    return sorted(found, key=lambda x: x[0])
+    # One combined file per frame — drop duplicate paths for same frame.
+    by_frame: dict[int, Path] = {}
+    for frame, path in found:
+        by_frame.setdefault(frame, path)
+    return sorted(by_frame.items(), key=lambda x: x[0])
 
 
 def _read_exr_channels(path: Path) -> tuple[np.ndarray, list[str]]:
@@ -144,12 +142,23 @@ def _export_stage_mp4(
     for frame_idx, exr_path in entries:
         pixels, names = _read_exr_channels(exr_path)
         if channel_kind == "rgba":
-            vis = _channel_plane(pixels, names, "A")
-            if vis is None:
-                vis = _channel_plane(pixels, names, "R")
-            if vis is None:
-                continue
-            rgb = np.stack([vis, vis, vis], axis=-1)
+            r = _channel_plane(pixels, names, "R")
+            g = _channel_plane(pixels, names, "G")
+            b = _channel_plane(pixels, names, "B")
+            if r is not None or g is not None or b is not None:
+                h, w = pixels.shape[0], pixels.shape[1]
+                rgb = np.zeros((h, w, 3), dtype=np.float32)
+                if r is not None:
+                    rgb[..., 0] = r
+                if g is not None:
+                    rgb[..., 1] = g
+                if b is not None:
+                    rgb[..., 2] = b
+            else:
+                vis = _channel_plane(pixels, names, "A")
+                if vis is None:
+                    continue
+                rgb = np.stack([vis, vis, vis], axis=-1)
         elif channel_kind == "mask":
             vis = _union_masks(pixels, names, "mask.")
             if vis is None:

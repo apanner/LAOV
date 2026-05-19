@@ -179,6 +179,16 @@ class _DetectedInstance:
     masks: dict[int, np.ndarray]  # frame_idx -> (H, W) float32 in [0, 1]
 
 
+def _instance_layer_name(inst: _DetectedInstance, instances: list[_DetectedInstance]) -> str:
+    """Named EXR layer for one track (disambiguate duplicate labels)."""
+    base = _slug_label(inst.label)
+    if sum(1 for o in instances if _slug_label(o.label) == base) > 1:
+        return f"{base}_{inst.track_id}"
+    if base.upper() in {"R", "G", "B", "A"}:
+        return f"{base}_layer"
+    return base
+
+
 class SAM3MattePass(UtilityPass):
     name = "sam3_matte"
     version = "0.1.0"
@@ -798,6 +808,11 @@ class SAM3MattePass(UtilityPass):
                 continue
             for f, mask in inst.masks.items():
                 per_frame.setdefault(f, {})[ch] = mask.astype(np.float32, copy=False)
+        # Named layers inside the combined stage EXR (person1, car, …) — one float channel each.
+        for inst in self._instances:
+            layer = _instance_layer_name(inst, self._instances)
+            for f, mask in inst.masks.items():
+                per_frame.setdefault(f, {})[layer] = mask.astype(np.float32, copy=False)
         return per_frame
 
     def _to_rank_instance(
@@ -849,6 +864,24 @@ class SAM3MattePass(UtilityPass):
             motion_energy=_mean_or_zero(motion_energies),
             user_priority=0.0,
         )
+
+    def release_gpu(self) -> None:
+        """Unload SAM3 detector/tracker weights after stage export."""
+        for attr in ("_det_model", "_trk_model", "_det_processor", "_trk_processor", "_model"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                try:
+                    import torch
+
+                    if hasattr(obj, "cpu"):
+                        obj.cpu()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
+        self._device = None
+        self._dtype = None
+        self._instances = []
+        self._forward_flow = {}
 
     # ------------------------------------------------------------------
     # Artifact emission

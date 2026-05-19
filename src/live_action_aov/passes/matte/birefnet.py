@@ -247,6 +247,11 @@ class BiRefNetRefinerPass(UtilityPass):
             fallback_stack=hard_proc if not fill_between else None,
         )
 
+    def release_gpu(self) -> None:
+        if self._session is not None:
+            self._session.release()
+            self._session = None
+
     def preprocess(self, frames: np.ndarray) -> Any:
         return frames
 

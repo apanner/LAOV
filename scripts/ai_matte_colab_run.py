@@ -58,6 +58,12 @@ AI_MATTE_DEFAULTS = {
     "matte_pipeline_phase": "stages",
     "qc_mp4": True,
     "proxy_long_edge": None,
+    # ViTMatte: 0 = auto long_edge from GPU (40GB A100 → 2048, 16GB → 1024, …).
+    "max_inference_long_edge": 0,
+    "vitmatte_inference_mode": "crop",
+    "vitmatte_crop_pad": 32,
+    "use_plate_jpeg_cache": True,
+    "plate_jpeg_quality": 92,
 }
 
 

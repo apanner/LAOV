@@ -123,6 +123,17 @@ class BiRefNetSession:
         model.eval()
         return cls(model, device=device, use_fp16=use_fp16)
 
+    def release(self) -> None:
+        if self._model is not None:
+            try:
+                import torch
+
+                self._model.cpu()
+                del self._model
+            except Exception:
+                pass
+            self._model = None
+
     def predict_alpha(
         self,
         rgb: np.ndarray,

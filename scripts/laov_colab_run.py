@@ -199,6 +199,10 @@ def _matte_pass_params(
         vit_dir = os.environ.get("AI_MATTE_VITMATTE_MODEL_PATH")
         if vit_dir:
             params["model_path"] = vit_dir
+        if shared.get("vitmatte_inference_mode") is not None:
+            params["inference_mode"] = shared["vitmatte_inference_mode"]
+        if shared.get("vitmatte_crop_pad") is not None:
+            params["crop_pad"] = shared["vitmatte_crop_pad"]
         for key in (
             "keyframe_stride",
             "fill_between_keyframes",
@@ -210,6 +214,13 @@ def _matte_pass_params(
             "trimap_fg_threshold",
             "precision",
             "model_id",
+            "max_inference_long_edge",
+            "inference_mode",
+            "crop_pad",
+            "use_plate_jpeg_cache",
+            "plate_cache_dir",
+            "plate_cache_keep",
+            "plate_jpeg_quality",
         ):
             val = matte.get(key, shared.get(key))
             if val is not None:

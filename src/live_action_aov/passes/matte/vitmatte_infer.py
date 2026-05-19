@@ -74,6 +74,38 @@ def sam3_mask_to_trimap(
 hard_mask_to_trimap = sam3_mask_to_trimap
 
 
+def _fit_size(h: int, w: int, max_long_edge: int) -> tuple[int, int]:
+    long_edge = max(h, w)
+    if long_edge <= max_long_edge:
+        return h, w
+    scale = max_long_edge / float(long_edge)
+    return max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+
+
+def _resize_plane(
+    arr: np.ndarray,
+    out_h: int,
+    out_w: int,
+    *,
+    nearest: bool = False,
+) -> np.ndarray:
+    from PIL import Image
+
+    resample = Image.NEAREST if nearest else Image.BILINEAR
+    if arr.ndim == 3 and arr.shape[-1] >= 3:
+        rgb = arr[..., :3]
+        if rgb.dtype != np.uint8:
+            rgb = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+        pil_in = Image.fromarray(rgb.astype(np.uint8), "RGB")
+        return np.asarray(pil_in.resize((out_w, out_h), resample))
+    plane = arr[..., 0] if arr.ndim == 3 else arr
+    if plane.dtype != np.uint8:
+        pil_in = Image.fromarray((np.clip(plane, 0.0, 1.0) * 255.0).astype(np.uint8), "L")
+    else:
+        pil_in = Image.fromarray(plane.astype(np.uint8), "L")
+    return np.asarray(pil_in.resize((out_w, out_h), resample))
+
+
 class ViTMatteSession:
     """Lazy-loaded ViTMatte (image + trimap). See HF ViTMatte docs."""
 
@@ -83,10 +115,12 @@ class ViTMatteSession:
         *,
         load_kw: dict[str, Any] | None = None,
         precision: str = "fp16",
+        max_inference_long_edge: int = 1024,
     ) -> None:
         self._model_id = model_id
         self._load_kw = dict(load_kw or {})
         self._precision = precision
+        self._max_inference_long_edge = max(256, int(max_inference_long_edge))
         self._model = None
         self._processor = None
         self._device = None
@@ -98,8 +132,14 @@ class ViTMatteSession:
         *,
         load_kw: dict[str, Any] | None = None,
         precision: str = "fp16",
+        max_inference_long_edge: int = 1024,
     ) -> ViTMatteSession:
-        return cls(repo_or_path, load_kw=load_kw, precision=precision)
+        return cls(
+            repo_or_path,
+            load_kw=load_kw,
+            precision=precision,
+            max_inference_long_edge=max_inference_long_edge,
+        )
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
@@ -115,6 +155,19 @@ class ViTMatteSession:
         self._model.to(self._device)
         if self._precision == "fp16" and self._device.type == "cuda":
             self._model.half()
+
+    def release(self) -> None:
+        """Drop weights/processor so the next pipeline stage can use VRAM."""
+        if self._model is not None:
+            try:
+                import torch
+
+                self._model.cpu()
+                del self._model
+            except Exception:
+                pass
+            self._model = None
+        self._processor = None
 
     def predict_alpha(
         self,
@@ -139,6 +192,12 @@ class ViTMatteSession:
                 PILImage.fromarray(trimap).resize((w, h), PILImage.NEAREST),
                 dtype=np.uint8,
             )
+
+        infer_h, infer_w = _fit_size(h, w, self._max_inference_long_edge)
+        if (infer_h, infer_w) != (h, w):
+            rgb_u8 = _resize_plane(rgb_u8, infer_h, infer_w, nearest=False).astype(np.uint8)
+            trimap = _resize_plane(trimap, infer_h, infer_w, nearest=True).astype(np.uint8)
+
         pil_rgb = Image.fromarray(rgb_u8, "RGB")
         pil_tri = Image.fromarray(trimap, "L")
 
@@ -151,6 +210,7 @@ class ViTMatteSession:
 
         with torch.no_grad():
             alphas = self._model(**inputs).alphas
+        del inputs
 
         from PIL import Image as PILImage
 

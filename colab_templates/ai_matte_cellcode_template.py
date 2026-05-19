@@ -66,8 +66,22 @@ def _run_colab_host_job(config_path: str, laov_git: str, date_folder: str) -> bo
     if os.path.exists(laov_root):
         shutil.rmtree(laov_root)
 
-    # 1) Clone LAOV
+    # 1) Clone LAOV (must include combined-matte EXR export on main)
     _run_cmd("Clone LAOV", ["git", "clone", "--depth", "1", laov_git, laov_root])
+    commit = subprocess.run(
+        ["git", "-C", laov_root, "log", "-1", "--oneline"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    print("[LAOV] " + (commit.stdout or commit.stderr or "").strip())
+    export_py = os.path.join(laov_root, "src", "live_action_aov", "io", "rgba_matte_export.py")
+    with open(export_py, encoding="utf-8") as f:
+        if "combined_matte" not in f.read():
+            raise RuntimeError(
+                "LAOV on GitHub is too old (still per-slot EXR export). "
+                "Push latest LAOV main, then re-run Cell 3."
+            )
 
     # 2) Editable install (no deps — colab_setup installs them)
     _run_cmd(

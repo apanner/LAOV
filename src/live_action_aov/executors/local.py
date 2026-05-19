@@ -173,6 +173,10 @@ class LocalExecutor(Executor):
 
             total_passes = max(1, len(ordered))
             for pass_idx, node in enumerate(ordered):
+                if pass_idx > 0:
+                    from live_action_aov.executors.gpu_release import clear_vram_cache
+
+                    clear_vram_cache()
                 # Cancel checkpoint #1: between passes. This is the
                 # most useful one in practice — a heavy pass like
                 # DepthCrafter or NormalCrafter can run for minutes,
@@ -220,6 +224,16 @@ class LocalExecutor(Executor):
                 if export_subdir and sidecar_dir and frame_outputs:
                     from live_action_aov.io.stage_export import write_pass_stage_export
 
+                    heroes_meta: list[dict] = []
+                    if hasattr(instance, "_heroes"):
+                        for h in instance._heroes:
+                            heroes_meta.append(
+                                {
+                                    "track_id": int(h.track_id),
+                                    "slot": str(h.slot),
+                                    "label": str(getattr(h, "label", "")),
+                                }
+                            )
                     write_pass_stage_export(
                         pass_name=node.name,
                         export_subdir=export_subdir,
@@ -228,6 +242,7 @@ class LocalExecutor(Executor):
                         per_frame_channels=frame_outputs,
                         shot_name=shot.name,
                         pixel_aspect=shot.pixel_aspect,
+                        attrs_extra={"heroes": heroes_meta} if heroes_meta else None,
                     )
                     if node.name == "sam3_matte" and artifacts.get("sam3_hard_masks"):
                         from live_action_aov.io.sam3_artifact_io import save_sam3_artifacts
@@ -238,6 +253,10 @@ class LocalExecutor(Executor):
                             frame_range=shot.frame_range,
                             shot_name=shot.name,
                         )
+
+                from live_action_aov.executors.gpu_release import release_pass_gpu
+
+                release_pass_gpu(instance, stage_name=node.name)
 
             # --- Auto-wire TemporalSmoother for PER_FRAME passes with
             # `smooth: auto` (spec §13.1 Phase 2). Only runs when a flow pass

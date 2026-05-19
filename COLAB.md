@@ -109,9 +109,9 @@ Default Desk layout (`output_folder_path` is usually `VDA_output`, date from Col
 
 ```text
 MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
-  matte_sam3/      # SAM3 hard matte — one RGBA EXR per hero slot (R,G,B,A only)
-  matte_birefnet/ # BiRefNet soft matte — RGBA per slot (full plate resolution)
-  matte_vitmatte/  # ViTMatte soft matte — RGBA per slot (optional)
+  matte_sam3/      # one EXR/frame: plate_sam3_matte.####.exr (R,G,B,A + named layers)
+  matte_birefnet/  # plate_birefnet_matte.####.exr — R/G/B/A = hero slots; extra layers by label
+  matte_vitmatte/  # plate_vitmatte_matte.####.exr (optional)
   matte/           # Final temporal matte (BiRefNet + RAFT fill) when enabled in Desk
   flow/            # RAFT motion (optional; not a matte)
   qc/              # MP4 per stage (*_sam3_*, *_birefnet_*, *_final_*, …)
@@ -123,10 +123,11 @@ MyDrive/<output_folder_path>/<YYYYMMDD>/AI_MATTE_output/<shot_name>/
 | Output | What it is |
 |--------|------------|
 | **`flow/`** | Optical flow (motion vectors). Intermediate data for `matte_flow_temporal` — not for comp mattes. |
-| **`matte/*.matte.<frame>.exr`** | Multi-channel EXR per frame. |
-| → `mask.<concept>` | **SAM3** — hard union masks per concept (e.g. `mask.person`). |
-| → `matte.r/g/b/a` | Optional: **RAFT temporal fill** (`export_final_exr`) — off by default; use stage folders instead. |
-| **`qc/*_sam3_matte_qc.mp4`** | Preview of SAM3 `mask.*` (green on plate). |
+| **`matte_sam3/plate_sam3_matte.####.exr`** | One file per frame. **R,G,B,A** = hero slots r,g,b,a; extra float layers = hero labels (`bg_yellow_guy`, `person_2`, …). |
+| **`matte_birefnet/plate_birefnet_matte.####.exr`** | Same layout; channels hold BiRefNet soft alphas. |
+| **`matte_vitmatte/plate_vitmatte_matte.####.exr`** | Same layout; **R,G,B,A** read `vitmatte.r/g/b/a`. |
+| **`matte/*.matte.<frame>.exr`** | Optional final temporal pass (`export_final_exr`) — off by default. |
+| **`qc/*_sam3_matte_qc.mp4`** | Preview: **R,G,B** as red/green/blue mattes on plate. |
 | **`qc/*_final_matte_qc.mp4`** | Preview of final `matte.*` (BiRefNet + temporal). |
 
 **Pipeline (yes — BiRefNet uses SAM3)**
@@ -145,6 +146,14 @@ Example EXR:
 ```text
 MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_020_plate_v001.matte.1001.exr
 ```
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|--------|--------|-----|
+| Log says `RGBA stage export … 200 EXR(s) (R,G,B,A per slot)` | Colab cloned **old** LAOV | Push `main` to GitHub; re-run Cell 3. Good log: `Combined matte export … N frames (one EXR per frame)`. |
+| `matte_birefnet/*_matte_r.1001.exr` files | Same — old export | Expect `*_birefnet_matte.1001.exr` only (one file per frame). |
+| ViTMatte `CUDA out of memory` on full-res plate | ViTDet attention is O(pixels²); old code stacked 50×4K RGB in RAM | Push LAOV: **JPEG plate cache**, **one frame at a time**, **crop** infer, GPU unload after BiRefNet. **`max_inference_long_edge: 0`** = auto from GPU (40GB A100 → 2048, 24GB → 1536, 16GB → 1024). Override: env `AI_MATTE_VITMATTE_MAX_EDGE=1536` or JSON field. |
 
 Example QC MP4:
 

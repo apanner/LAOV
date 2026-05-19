@@ -57,6 +57,9 @@ def write_pass_stage_export(
     ):
         from live_action_aov.io.rgba_matte_export import write_rgba_matte_stage_export
 
+        heroes = None
+        if attrs_extra and "heroes" in attrs_extra:
+            heroes = attrs_extra.get("heroes")
         return write_rgba_matte_stage_export(
             pass_name=pass_name,
             export_subdir=export_subdir,
@@ -66,6 +69,7 @@ def write_pass_stage_export(
             shot_name=shot_name,
             pixel_aspect=pixel_aspect,
             attrs_extra=attrs_extra,
+            heroes=heroes,
         )
 
     stage_dir = (output_root / export_subdir).resolve()
