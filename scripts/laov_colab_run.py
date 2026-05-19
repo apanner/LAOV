@@ -139,6 +139,9 @@ def _matte_pass_params(
             params["matte_mode"] = "bbox"
         if matte.get("heroes"):
             params["heroes"] = list(matte["heroes"])
+        if matte.get("matte_notes"):
+            params["matte_notes"] = list(matte["matte_notes"])
+            params["matte_mode"] = "notes"
         if matte.get("sample_frame") is not None:
             params["sample_frame"] = matte["sample_frame"]
         if matte.get("confidence_threshold") is not None:

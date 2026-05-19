@@ -68,6 +68,14 @@ from live_action_aov.passes.matte.rank import (
 _log = logging.getLogger(__name__)
 
 
+def _slug_label(label: str) -> str:
+    """Safe mask channel suffix from a user matte note (e.g. 'bg yellow guy' → 'bg_yellow_guy')."""
+    import re
+
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", str(label).strip().lower()).strip("_")
+    return s or "subject"
+
+
 def _resolve_model_source(params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """HF hub id or local snapshot path + ``from_pretrained`` kwargs."""
     raw_path = params.get("model_path") or os.environ.get("LAOV_SAM3_MODEL_PATH")
@@ -216,7 +224,9 @@ class SAM3MattePass(UtilityPass):
         "heroes": [],  # user overrides: [{"track_id": 17, "slot": "r"}]
         # AI Matte / Desk: rectangular prompts on seed frame (normalized 0–1 xywh).
         "box_prompts": [],
-        "matte_mode": "auto",  # auto | people_fg | bbox | concepts
+        "matte_mode": "auto",  # auto | notes | people_fg | bbox | concepts
+        # Per-shot matte notes: [{"label": "bg yellow guy", "prompt": "...", "slot": "r"}]
+        "matte_notes": [],
     }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -417,6 +427,100 @@ class SAM3MattePass(UtilityPass):
                 next_track_id += 1
         return seeds
 
+    def _detect_seed_note(
+        self,
+        seed_frame: np.ndarray,
+        prompt: str,
+    ) -> np.ndarray | None:
+        """Single open-vocabulary prompt → best instance mask on the seed frame."""
+        import torch
+        from PIL import Image
+
+        prompt = str(prompt).strip()
+        if not prompt:
+            return None
+
+        self._load_model()
+        assert self._det_model is not None
+        processor = self._det_processor
+        model = self._det_model
+        device = self._device
+
+        H, W = int(seed_frame.shape[0]), int(seed_frame.shape[1])
+        arr_u8 = (np.clip(seed_frame, 0.0, 1.0) * 255.0).astype(np.uint8)
+        pil = Image.fromarray(arr_u8, "RGB")
+
+        threshold = float(self.params.get("confidence_threshold", 0.4))
+        mask_threshold = 0.5
+        area_floor = float(self.params["min_area_fraction"]) * H * W
+
+        inputs = processor(images=pil, text=prompt, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        results = processor.post_process_instance_segmentation(
+            outputs,
+            threshold=threshold,
+            mask_threshold=mask_threshold,
+            target_sizes=[(H, W)],
+        )
+        if not results:
+            return None
+        result = results[0]
+        masks = result.get("masks")
+        scores = result.get("scores")
+        if masks is None or scores is None:
+            return None
+        n = int(masks.shape[0]) if hasattr(masks, "shape") else 0
+        best_mask: np.ndarray | None = None
+        best_score = -1.0
+        for i in range(n):
+            score = float(scores[i])
+            m = masks[i]
+            mask_np = (
+                m.float().cpu().numpy()
+                if hasattr(m, "float")
+                else np.asarray(m, dtype=np.float32)
+            ).astype(np.float32)
+            if float(mask_np.sum()) < area_floor:
+                continue
+            if score > best_score:
+                best_score = score
+                best_mask = mask_np
+        return best_mask
+
+    def _seeds_from_matte_notes(
+        self,
+        seed_frame: np.ndarray,
+        notes: list[dict[str, Any]],
+    ) -> list[tuple[int, str, np.ndarray]]:
+        """User matte notes → one SAM3 track seed each (max 4 slots)."""
+        slots = ("r", "g", "b", "a")
+        seeds: list[tuple[int, str, np.ndarray]] = []
+        for i, note in enumerate(notes[:4]):
+            if not isinstance(note, dict):
+                continue
+            label = str(note.get("label") or note.get("name") or f"note_{i + 1}").strip()
+            prompt = str(note.get("prompt") or label).strip()
+            if not prompt:
+                continue
+            mask = self._detect_seed_note(seed_frame, prompt)
+            if mask is None:
+                _log.warning("SAM3: no detection for matte note %r (prompt=%r)", label, prompt)
+                continue
+            track_id = int(note.get("track_id", i + 1))
+            slot = str(note.get("slot", slots[i]))
+            channel_label = _slug_label(label)
+            _log.info(
+                "SAM3: matte note %r (prompt=%r) → track %s slot=%s channel=mask.%s",
+                label,
+                prompt,
+                track_id,
+                slot,
+                channel_label,
+            )
+            seeds.append((track_id, channel_label, mask))
+        return seeds
+
     def _track_instance(
         self,
         frames: np.ndarray,
@@ -577,17 +681,23 @@ class SAM3MattePass(UtilityPass):
 
         box_prompts = list(self.params.get("box_prompts") or [])
         matte_mode = str(self.params.get("matte_mode", "auto")).strip().lower()
+        matte_notes = list(self.params.get("matte_notes") or [])
         if matte_mode == "people_fg":
             concepts = ["person"]
+        elif matte_mode == "notes" and matte_notes:
+            concepts = []
         elif matte_mode == "bbox" and box_prompts:
             concepts = []
         elif matte_mode == "concepts":
             concepts = [str(c) for c in self.params["concepts"]]
         else:
-            concepts = [str(c) for c in self.params["concepts"]]
+            # Smart auto — discover common foreground types when user gave no notes.
+            concepts = [str(c) for c in self.params.get("concepts") or ["person", "vehicle", "animal"]]
 
         if box_prompts:
             seeds = self._seeds_from_box_prompts(seed_rgb, box_prompts, plate_h, plate_w)
+        elif matte_mode == "notes" and matte_notes:
+            seeds = self._seeds_from_matte_notes(seed_rgb, matte_notes)
         else:
             seeds = self._detect_seed(seed_rgb, concepts) if concepts else []
 
@@ -643,6 +753,17 @@ class SAM3MattePass(UtilityPass):
         # Build the light Instance objects and rank them.
         rank_weights = RankWeights(**self.params["ranking"])
         hero_list = list(self.params.get("heroes") or [])
+        if matte_notes and matte_mode == "notes" and not hero_list:
+            slots = ("r", "g", "b", "a")
+            for i, note in enumerate(matte_notes[:4]):
+                if not isinstance(note, dict):
+                    continue
+                hero_list.append(
+                    {
+                        "track_id": int(note.get("track_id", i + 1)),
+                        "slot": str(note.get("slot", slots[i])),
+                    }
+                )
         if box_prompts and not hero_list:
             slots = ("r", "g", "b", "a")
             for i, box in enumerate(box_prompts[:4]):
