@@ -53,7 +53,7 @@ AI_MATTE_DEFAULTS = {
     "export_final_exr": False,
     "export_flow_exr": False,
     "run_matte_flow_temporal": False,
-    "matte_pipeline_phase": "sam3",
+    "matte_pipeline_phase": "stages",
     "qc_mp4": True,
 }
 
@@ -72,7 +72,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--phase",
-        choices=("sam3", "refine", "temporal", "all"),
+        choices=("stages", "sam3", "refine", "temporal", "all"),
         default=None,
         help="Pipeline phase (overrides batch JSON matte_pipeline_phase).",
     )
@@ -80,15 +80,38 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _pipeline_phase(shared: dict, cli_phase: str | None) -> str:
-    phase = str(cli_phase or shared.get("matte_pipeline_phase", "sam3")).strip().lower()
-    if phase not in ("sam3", "refine", "temporal", "all"):
-        return "sam3"
+    phase = str(cli_phase or shared.get("matte_pipeline_phase", "stages")).strip().lower()
+    if phase not in ("stages", "sam3", "refine", "temporal", "all"):
+        return "stages"
     return phase
 
 
-def _build_ai_matte_pass_names(shared: dict, *, phase: str) -> list[str]:
-    """Schedule passes for one Colab phase (not everything at once)."""
+def _refiners_from_exports(shared: dict) -> list[str]:
+    """Refiner passes to run after SAM3 (checkboxes + active refiner)."""
     refiner = str(shared.get("refiner", "birefnet_refiner"))
+    names: list[str] = []
+    if bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner":
+        names.append("birefnet_refiner")
+    if bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner":
+        names.append("vitmatte_refiner")
+    if refiner == "rvm_refiner":
+        names.append("rvm_refiner")
+    # Dedupe preserve order
+    out: list[str] = []
+    for n in names:
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _build_ai_matte_pass_names(shared: dict, *, phase: str) -> list[str]:
+    """Schedule passes for one Colab phase."""
+    refiner = str(shared.get("refiner", "birefnet_refiner"))
+
+    if phase == "stages":
+        names = ["sam3_matte"]
+        names.extend(_refiners_from_exports(shared))
+        return names
 
     if phase == "sam3":
         return ["sam3_matte"]
@@ -132,7 +155,14 @@ def _build_ai_matte_pass_names(shared: dict, *, phase: str) -> list[str]:
 
 def _stage_export_map(shared: dict, *, phase: str) -> dict[str, str]:
     exports: dict[str, str] = {}
-    if phase == "sam3" and shared.get("export_sam3_exr", True):
+    if phase == "stages":
+        if shared.get("export_sam3_exr", True):
+            exports["sam3_matte"] = "matte_sam3"
+        if shared.get("export_birefnet_exr", True):
+            exports["birefnet_refiner"] = "matte_birefnet"
+        if shared.get("export_vitmatte_exr", False):
+            exports["vitmatte_refiner"] = "matte_vitmatte"
+    elif phase == "sam3" and shared.get("export_sam3_exr", True):
         exports["sam3_matte"] = "matte_sam3"
     elif phase == "refine":
         refiner = str(shared.get("refiner", "birefnet_refiner"))

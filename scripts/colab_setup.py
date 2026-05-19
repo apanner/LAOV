@@ -15,6 +15,7 @@ import sys
 
 # Pip specs for Colab headless lane (torch/torchvision/PySide6 excluded on purpose).
 COLAB_PIP_DEPS: tuple[str, ...] = (
+    "numpy>=1.26,<2.0",
     "pydantic>=2.5",
     "typer>=0.12",
     "PyYAML>=6.0",
