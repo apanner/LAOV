@@ -3,8 +3,9 @@
 
 Run after: ``pip install -e /content/LAOV --no-deps``
 
-Uses Colab's existing ``torch`` / ``torchvision``. Installs every package LAOV
-needs for the commercial Desk preset (depth, normals, flow, matte).
+  python scripts/colab_setup.py          # missing packages only
+  python scripts/colab_setup.py --matte  # AI Matte lane (numpy 1.x + kornia + I/O)
+  python scripts/colab_setup.py --full   # reinstall full bundle
 """
 from __future__ import annotations
 
@@ -13,7 +14,6 @@ import importlib.util
 import subprocess
 import sys
 
-# Pip specs for Colab headless lane (torch/torchvision/PySide6 excluded on purpose).
 COLAB_PIP_DEPS: tuple[str, ...] = (
     "numpy>=1.26,<2.0",
     "pydantic>=2.5",
@@ -37,7 +37,20 @@ COLAB_PIP_DEPS: tuple[str, ...] = (
     "kornia>=0.7",
 )
 
-# import_name -> pip spec (for post-install import verification)
+# AI Matte Colab — always install these (BiRefNet needs kornia every run).
+MATTE_COLAB_DEPS: tuple[str, ...] = (
+    "numpy>=1.26,<2.0",
+    "kornia>=0.7",
+    "oiio-python>=2.5",
+    "opencolorio>=2.3",
+    "geffnet>=1.0",
+    "opencv-python-headless>=4.8",
+    "transformers>=4.51.0",
+    "huggingface-hub>=0.23",
+    "Pillow",
+    "tqdm>=4.66",
+)
+
 VERIFY_IMPORTS: dict[str, str] = {
     "pydantic": "pydantic>=2.5",
     "typer": "typer>=0.12",
@@ -56,44 +69,13 @@ VERIFY_IMPORTS: dict[str, str] = {
 }
 
 TORCH_MODULES = ("torch", "torchvision")
-_PLATE_SUFFIXES = (".exr", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".dpx", ".tga")
 
 
 def _has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def _numpy_needs_downgrade() -> bool:
-    try:
-        import numpy as np
-    except ImportError:
-        return True
-    ver = getattr(np, "__version__", "0")
-    parts = ver.split(".")
-    try:
-        major = int(parts[0])
-    except (ValueError, IndexError):
-        return False
-    return major >= 2
-
-
-def ensure_numpy_colab() -> None:
-    """LAOV requires numpy 1.x; Colab often ships numpy 2.x."""
-    if not _numpy_needs_downgrade():
-        import numpy as np
-
-        print(f"[OK] numpy {np.__version__} (compatible with LAOV)")
-        return
-    print("[INSTALL] numpy>=1.26,<2.0 (Colab ships numpy 2.x; LAOV needs 1.x)")
-    _pip_install("numpy>=1.26,<2.0", quiet=False)
-    import numpy as np
-
-    if _numpy_needs_downgrade():
-        raise RuntimeError(f"numpy still incompatible after install: {np.__version__}")
-    print(f"[OK] numpy {np.__version__}")
-
-
-def _pip_install(*specs: str, quiet: bool = True) -> None:
+def _pip_install(*specs: str, quiet: bool = False) -> None:
     if not specs:
         return
     cmd = [sys.executable, "-m", "pip", "install"]
@@ -104,8 +86,57 @@ def _pip_install(*specs: str, quiet: bool = True) -> None:
     subprocess.run(cmd, check=True)
 
 
+def _numpy_major() -> int | None:
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    parts = getattr(np, "__version__", "0").split(".")
+    try:
+        return int(parts[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def ensure_numpy_colab() -> None:
+    major = _numpy_major()
+    if major is not None and major < 2:
+        import numpy as np
+
+        print(f"[OK] numpy {np.__version__}")
+        return
+    print("[INSTALL] numpy>=1.26,<2.0")
+    _pip_install("numpy>=1.26,<2.0")
+    import numpy as np
+
+    print(f"[OK] numpy {np.__version__}")
+
+
+def ensure_kornia_colab() -> None:
+    """BiRefNet HF code imports kornia — install every AI Matte run."""
+    print("[INSTALL] kornia>=0.7 (BiRefNet)")
+    _pip_install("kornia>=0.7")
+    import kornia  # noqa: F401
+
+    print(f"[OK] kornia {kornia.__version__}")
+
+
+def ensure_matte_colab_dependencies() -> None:
+    """AI Matte lane: numpy 1.x, kornia, plate I/O, transformers."""
+    print("[COLAB] AI Matte dependency setup")
+    ensure_numpy_colab()
+    ensure_kornia_colab()
+    rest = tuple(
+        s
+        for s in MATTE_COLAB_DEPS
+        if not s.startswith("numpy") and not s.startswith("kornia")
+    )
+    _pip_install(*rest, quiet=True)
+    _verify_imports(must_have=("kornia", "numpy", "OpenImageIO", "torch", "transformers"))
+    print("[OK] AI Matte Colab deps ready.")
+
+
 def ensure_laov_colab_dependencies(*, full: bool = False) -> None:
-    """Install Colab deps. ``full=False`` (default) installs only missing imports."""
     ensure_numpy_colab()
     missing_torch = [m for m in TORCH_MODULES if not _has_module(m)]
     if missing_torch:
@@ -116,8 +147,8 @@ def ensure_laov_colab_dependencies(*, full: bool = False) -> None:
         )
 
     if full:
-        print("[COLAB] Installing LAOV Colab dependency bundle...")
-        _pip_install(*COLAB_PIP_DEPS, quiet=False)
+        print("[COLAB] Installing full LAOV Colab bundle...")
+        _pip_install(*COLAB_PIP_DEPS)
     else:
         to_install: list[str] = []
         seen: set[str] = set()
@@ -131,40 +162,41 @@ def ensure_laov_colab_dependencies(*, full: bool = False) -> None:
                 seen.add(name)
                 to_install.append(spec)
         if to_install:
-            _pip_install(*to_install, quiet=False)
+            _pip_install(*to_install)
         else:
             print("[OK] LAOV Colab: imports already satisfied.")
+        if not _has_module("kornia"):
+            ensure_kornia_colab()
 
     _verify_imports()
     print("[OK] LAOV Colab dependency install finished.")
 
 
-def _verify_imports() -> None:
+def _verify_imports(must_have: tuple[str, ...] | None = None) -> None:
+    check = must_have or tuple(VERIFY_IMPORTS.keys())
     failed: list[str] = []
-    for mod, spec in VERIFY_IMPORTS.items():
+    for mod in check:
+        spec = VERIFY_IMPORTS.get(mod, mod)
         if not _has_module(mod):
-            failed.append(f"{mod} (pip: {spec})")
+            failed.append(f"{mod} ({spec})")
     if failed:
-        raise RuntimeError(
-            "Missing imports after install: " + ", ".join(failed) + ". Re-run colab_setup.py."
-        )
-    try:
-        import OpenImageIO as oiio  # noqa: F401
+        raise RuntimeError("Missing imports: " + ", ".join(failed))
+    import OpenImageIO as oiio  # noqa: F401
 
-        _ = oiio
-    except ImportError as exc:
-        raise RuntimeError(
-            "OpenImageIO import failed. Try: pip install -q --force-reinstall oiio-python>=2.5"
-        ) from exc
-    print("[OK] Import verification passed (OpenImageIO, torch, transformers, …).")
+    _ = oiio
+    print("[OK] Import check passed.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LAOV Colab dependency installer")
+    parser.add_argument("--full", action="store_true", help="Reinstall full COLAB_PIP_DEPS")
     parser.add_argument(
-        "--full",
+        "--matte",
         action="store_true",
-        help="Reinstall the full COLAB_PIP_DEPS bundle (default: only missing packages).",
+        help="AI Matte lane: numpy 1.x + kornia + plate I/O (recommended for Cell 3)",
     )
     args = parser.parse_args()
-    ensure_laov_colab_dependencies(full=args.full)
+    if args.matte:
+        ensure_matte_colab_dependencies()
+    else:
+        ensure_laov_colab_dependencies(full=args.full)
