@@ -218,6 +218,19 @@ def _ai_matte_post_configs(shared: dict) -> list:
     ]
 
 
+def _ensure_colab_runtime() -> None:
+    """Pin numpy 1.x and verify imports before the batch run."""
+    setup_py = _SCRIPTS_DIR / "colab_setup.py"
+    if setup_py.is_file():
+        _log.info("Colab runtime check (numpy + imports)...")
+        subprocess.run(
+            [sys.executable, str(setup_py)],
+            check=True,
+        )
+    else:
+        _log.warning("colab_setup.py not found — skipping numpy pin")
+
+
 def _ensure_birefnet_colab_deps() -> None:
     """BiRefNet HF snapshot modeling imports kornia (not always on Colab by default)."""
     if importlib.util.find_spec("kornia") is not None:
@@ -284,8 +297,35 @@ def _probe_plate_read(plate_dir: Path, pattern: str, frame: int) -> None:
         _log.error("Plate probe failed for %s frame %s: %s", plate_dir, frame, exc)
 
 
+def _log_runtime_versions() -> None:
+    import numpy as np
+
+    ver = np.__version__
+    print(f"[AI_MATTE] numpy {ver}", flush=True)
+    if tuple(int(x) for x in ver.split(".")[:2]) >= (2, 0):
+        print(
+            "[AI_MATTE] ERROR: numpy 2.x is incompatible with LAOV — re-run colab_setup.py",
+            flush=True,
+        )
+
+
 def main() -> int:
     configure_flushed_logging()
+    print("[AI_MATTE] Starting ai_matte_colab_run.py", flush=True)
+    try:
+        _ensure_colab_runtime()
+    except subprocess.CalledProcessError as exc:
+        _log.error("Colab setup failed (numpy/imports): %s", exc)
+        return 1
+    _log_runtime_versions()
+    try:
+        import numpy as np
+
+        if tuple(int(x) for x in np.__version__.split(".")[:2]) >= (2, 0):
+            return 1
+    except ImportError:
+        _log.error("numpy not installed after colab_setup")
+        return 1
     args = _parse_args()
     job_path = Path(args.job_json).resolve()
     if not job_path.is_file():
@@ -360,14 +400,18 @@ def main() -> int:
         if vit_dir:
             os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vit_dir
             _log.info("ViTMatte model: %s", vit_dir)
-        elif phase in ("refine", "all"):
+        else:
             _log.error(
                 "ViTMatte snapshot not found. Upload MyDrive/VDA_models/hustvl/vitmatte-base-composition-1k/"
             )
             return 1
 
-    if phase == "sam3" and not sam3_model_dir:
-        _log.warning("SAM3 phase: no local snapshot — Hub download may require HF login")
+    if "sam3_matte" in pass_names_preview and not sam3_model_dir:
+        _log.error(
+            "SAM3 snapshot not found on Drive. Upload MyDrive/VDA_models/facebook/sam3/ "
+            "(config.json + model.safetensors)"
+        )
+        return 1
 
     sequences = cfg.get("sequences") or []
     if not sequences:
@@ -424,6 +468,13 @@ def _run_sequences(
     pass_names = _build_ai_matte_pass_names(shared, phase=phase)
     stage_exports = _stage_export_map(shared, phase=phase)
     _log.info("Phase %s — passes: %s", phase, ", ".join(pass_names))
+    _log.info(
+        "Exports: sam3=%s birefnet=%s vitmatte=%s qc_mp4=%s",
+        shared.get("export_sam3_exr", True),
+        shared.get("export_birefnet_exr", True),
+        shared.get("export_vitmatte_exr", True),
+        shared.get("qc_mp4", True),
+    )
     registry = get_registry()
     for name in pass_names:
         lic = registry.get_pass(name).declared_license()
@@ -596,4 +647,8 @@ def _run_sequences(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception:
+        traceback.print_exc()
+        raise SystemExit(1) from None

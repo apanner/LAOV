@@ -44,7 +44,7 @@ Inference time is unchanged; split mode mainly saves **disk write time** and **c
 
 **Plate path:** batch JSON should use the full Drive-relative folder (e.g. `VDA_input/LOT_test/TB_005_010_1`). If Desk sends only `VDA_input/TB_005_010_1`, `laov_colab_run.py` searches under `VDA_input/` for a matching plate folder.
 
-**Pip warnings** after `pip install -e --no-deps` about `pyside6` or `numpy<2` are expected on Colab. PySide6 is for the desktop GUI only (not installed on Colab). Numpy 2.x on Colab is fine for the headless lane — the warning is package metadata, not a failed install.
+**Pip warnings** after `pip install -e --no-deps` about `pyside6` are harmless on Colab (GUI-only). **`numpy` must be 1.x** — Colab ships 2.x; `colab_setup.py` downgrades to `numpy>=1.26,<2.0` before the batch run. If you still see `numpy 2.0.2`, re-run `python scripts/colab_setup.py` and check `[OK] numpy 1.x`.
 
 ## SAM3 on Google Drive (no Colab login)
 
@@ -236,7 +236,9 @@ LAOV also applies a runtime alias patch in ``sam3_matte`` for older Colab caches
 
 CLI: `--phase stages|sam3|refine|temporal`
 
-**numpy on Colab:** `colab_setup.py` pins `numpy>=1.26,<2.0` for LAOV.
+**numpy on Colab:** `colab_setup.py` always runs `ensure_numpy_colab()` first (downgrades Colab’s numpy 2.x). `ai_matte_colab_run.py` calls it again at startup. **PySide6** is not installed on Colab — ignore pip metadata warnings.
+
+**Exit code 1 with little output:** scroll up for `ERROR` lines — common causes: missing `VDA_models/...` snapshot (SAM3 / BiRefNet / ViTMatte), plate path not on Drive, or `kornia` missing (BiRefNet). Uncheck ViTMatte in Desk if that model is not on Drive.
 
 ## Colab notebook: `CODE_FILE_ID` must be AI Matte cellcode
 

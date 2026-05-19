@@ -63,6 +63,36 @@ def _has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+def _numpy_needs_downgrade() -> bool:
+    try:
+        import numpy as np
+    except ImportError:
+        return True
+    ver = getattr(np, "__version__", "0")
+    parts = ver.split(".")
+    try:
+        major = int(parts[0])
+    except (ValueError, IndexError):
+        return False
+    return major >= 2
+
+
+def ensure_numpy_colab() -> None:
+    """LAOV requires numpy 1.x; Colab often ships numpy 2.x."""
+    if not _numpy_needs_downgrade():
+        import numpy as np
+
+        print(f"[OK] numpy {np.__version__} (compatible with LAOV)")
+        return
+    print("[INSTALL] numpy>=1.26,<2.0 (Colab ships numpy 2.x; LAOV needs 1.x)")
+    _pip_install("numpy>=1.26,<2.0", quiet=False)
+    import numpy as np
+
+    if _numpy_needs_downgrade():
+        raise RuntimeError(f"numpy still incompatible after install: {np.__version__}")
+    print(f"[OK] numpy {np.__version__}")
+
+
 def _pip_install(*specs: str, quiet: bool = True) -> None:
     if not specs:
         return
@@ -76,6 +106,7 @@ def _pip_install(*specs: str, quiet: bool = True) -> None:
 
 def ensure_laov_colab_dependencies(*, full: bool = False) -> None:
     """Install Colab deps. ``full=False`` (default) installs only missing imports."""
+    ensure_numpy_colab()
     missing_torch = [m for m in TORCH_MODULES if not _has_module(m)]
     if missing_torch:
         raise RuntimeError(
