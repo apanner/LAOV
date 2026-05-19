@@ -225,6 +225,16 @@ LAOV also applies a runtime alias patch in ``sam3_matte`` for older Colab caches
 !huggingface-cli login
 ```
 
+## Colab notebook: `CODE_FILE_ID` must be AI Matte cellcode
+
+If Cell 1 fails with `ImportError: cannot import name 'setup_ai_matte_cell1'`, the notebook is downloading **VDA/DVD** cellcode, not AI Matte.
+
+1. Re-run **Send to Colab** from `run_app_ai_matte.bat` and copy **both** IDs from the generated notebook.
+2. Or on Drive: `VDA_Jobs/code/{job_id}_cellcode.py` from **that** job.
+3. After download, verify: `grep setup_ai_matte_cell1 /content/cellcode.py`
+
+Templates live in `LAOV/colab_templates/` (same as `google_desk_app/colab_templates/`).
+
 ## Verifying outputs
 
 ```bash
