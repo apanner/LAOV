@@ -124,7 +124,7 @@ def build_combined_matte_channels(
             alpha = _alpha_plane(channels, src)
             if alpha is None:
                 continue
-            slug = _slug_label(str(hero.get("label", f"track_{hero.get('track_id', 0)}"))
+            slug = _slug_label(str(hero.get("label", f"track_{hero.get('track_id', 0)}")))
             if slug in out:
                 continue
             out[slug] = alpha
