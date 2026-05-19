@@ -55,6 +55,35 @@ def test_search_when_compositions_missing(tmp_path: Path) -> None:
     assert resolved.name == "plates"
 
 
+def test_verify_desk_frame_range_requires_all_frames(tmp_path: Path) -> None:
+    mount = tmp_path / "drive"
+    leaf = "TB_073_020_plate_v001"
+    plate_root = mount / "VDA_input" / "oppy" / "073_020" / "Compositions" / leaf
+    _write_exr_seq(plate_root, "TB_073_020_plate_v001", range(1001, 1004), separator="_")
+    import pytest
+
+    with pytest.raises(FileNotFoundError, match="preflight failed"):
+        lcr._verify_desk_frame_range(
+            plate_root,
+            "TB_073_020_plate_v001_####.exr",
+            1001,
+            1400,
+        )
+
+
+def test_verify_desk_frame_range_passes_when_complete(tmp_path: Path) -> None:
+    plate_root = tmp_path / "plate"
+    _write_exr_seq(plate_root, "TB_073_020_plate_v001", range(1001, 1005), separator="_")
+    f0, f1 = lcr._verify_desk_frame_range(
+        plate_root,
+        "TB_073_020_plate_v001_####.exr",
+        1001,
+        1004,
+    )
+    assert f0 == 1001
+    assert f1 == 1004
+
+
 def test_shot_plate_from_desk_json_uses_first_frame_path(tmp_path: Path) -> None:
     mount = tmp_path / "drive"
     leaf = "TB_073_020_plate_v001"

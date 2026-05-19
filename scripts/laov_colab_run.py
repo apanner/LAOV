@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -504,6 +505,135 @@ def _desk_relpath_to_abs(mount: Path, rel: str) -> Path:
     return (mount / _normalize_drive_rel_path(rel)).resolve()
 
 
+def _frame_basename_from_pattern(pattern: str, frame: int) -> str:
+    """``TB_073_020_plate_v001_####.exr`` + 1353 → ``TB_073_020_plate_v001_1353.exr``."""
+    hash_run = re.search(r"#+", pattern)
+    if hash_run:
+        width = len(hash_run.group(0))
+        return f"{pattern[: hash_run.start()]}{frame:0{width}d}{pattern[hash_run.end() :]}"
+    printf = re.search(r"%0?(\d*)d", pattern)
+    if printf:
+        width = int(printf.group(1)) if printf.group(1) else 0
+        return pattern[: printf.start()] + (f"{frame:0{width}d}" if width else str(frame)) + pattern[printf.end() :]
+    return pattern
+
+
+def _plate_file_ready(path: Path, *, retries: int = 3) -> bool:
+    """Drive mounts can list a name before the bytes are readable on Colab."""
+    if not path.exists():
+        return False
+    for attempt in range(max(1, retries)):
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            pass
+        if attempt + 1 < retries:
+            time.sleep(0.35)
+    return False
+
+
+def _plate_pattern_to_regex(pattern: str) -> re.Pattern[str]:
+    """Match ``oiio_exr._pattern_to_regex`` without importing the LAOV package."""
+    if "#" in pattern:
+        rx = re.escape(pattern)
+        rx = re.sub(
+            r"(?:\\#)+",
+            lambda m: f"(?P<frame>\\d{{{(len(m.group(0)) // 2)}}})",
+            rx,
+        )
+        return re.compile("^" + rx + "$")
+    m = re.search(r"%0?(\d*)d", pattern)
+    if m:
+        width = m.group(1)
+        width_rx = f"\\d{{{int(width)}}}" if width else r"\d+"
+        prefix = re.escape(pattern[: m.start()])
+        suffix = re.escape(pattern[m.end() :])
+        return re.compile(f"^{prefix}(?P<frame>{width_rx}){suffix}$")
+    return re.compile("^" + re.escape(pattern) + "$")
+
+
+def _enumerate_plate_frame_numbers(plate_dir: Path, pattern: str) -> list[int]:
+    ext = Path(pattern).suffix.lower() or ".exr"
+    regex = _plate_pattern_to_regex(pattern)
+    frames: list[int] = []
+    for entry in sorted(plate_dir.iterdir()):
+        if not entry.is_file() or entry.suffix.lower() != ext:
+            continue
+        match = regex.match(entry.name)
+        if not match:
+            continue
+        frames.append(int(match.group("frame")))
+    if not frames:
+        raise FileNotFoundError(
+            f"No frames matched pattern {pattern!r} in {plate_dir}"
+        )
+    return sorted(frames)
+
+
+def _verify_desk_frame_range(
+    plate_dir: Path,
+    pattern: str,
+    desk_f0: int,
+    desk_f1: int,
+) -> tuple[int, int]:
+    """Require every Desk frame file to exist before SAM3/RAFT (no silent range shrink)."""
+    expected = desk_f1 - desk_f0 + 1
+    missing: list[tuple[int, Path]] = []
+    for frame in range(desk_f0, desk_f1 + 1):
+        path = plate_dir / _frame_basename_from_pattern(pattern, frame)
+        if not _plate_file_ready(path):
+            missing.append((frame, path))
+
+    scanned = [
+        f
+        for f in _enumerate_plate_frame_numbers(plate_dir, pattern)
+        if desk_f0 <= f <= desk_f1
+    ]
+
+    if missing:
+        lines = [
+            f"Plate preflight failed: {len(missing)}/{expected} frames missing under",
+            f"  {plate_dir}",
+            f"  pattern: {pattern}",
+        ]
+        for frame, path in missing[:30]:
+            lines.append(f"  frame {frame}: {path.name}")
+        if len(missing) > 30:
+            lines.append(f"  ... and {len(missing) - 30} more")
+        lines.append(
+            f"  Folder scan (regex): {len(scanned)} files in Desk range "
+            f"{desk_f0}-{desk_f1}"
+        )
+        if len(scanned) >= expected - len(missing):
+            lines.append(
+                "  Names appear in directory listing but files are not readable yet — "
+                "wait for Google Drive sync on Colab, remount Drive, then retry."
+            )
+        else:
+            lines.append(
+                "  Re-scan the shot in Desk or upload missing EXRs to Drive."
+            )
+        raise FileNotFoundError("\n".join(lines))
+
+    if len(scanned) != expected:
+        _log.warning(
+            "Folder scan count %d != Desk span %d (pattern %r) — per-frame paths OK",
+            len(scanned),
+            expected,
+            pattern,
+        )
+
+    _log.info(
+        "Plate preflight OK: %d frames %s-%s verified in %s",
+        expected,
+        desk_f0,
+        desk_f1,
+        plate_dir,
+    )
+    return desk_f0, desk_f1
+
+
 def shot_plate_from_desk_json(
     mount: Path,
     seq: dict,
@@ -559,8 +689,17 @@ def shot_plate_from_desk_json(
         if input_pattern
         else first_path.name
     )
-    f0 = int(seq.get("first_frame", 1001))
-    f1 = int(seq.get("last_frame", f0))
+    desk_f0 = int(seq.get("first_frame", 1001))
+    desk_f1 = int(seq.get("last_frame", desk_f0))
+    f0, f1 = _verify_desk_frame_range(plate_dir, pattern, desk_f0, desk_f1)
+
+    last_rel = str(seq.get("plate_last_frame_relpath") or "").strip()
+    if last_rel:
+        last_path = _desk_relpath_to_abs(mount, last_rel)
+        if not _plate_file_ready(last_path):
+            raise FileNotFoundError(
+                f"Desk last frame not readable on mount:\n  {last_path}"
+            )
 
     try:
         from live_action_aov.io.oiio_io import read_plate
@@ -576,14 +715,24 @@ def shot_plate_from_desk_json(
 
     try:
         _log.info(
-            "Desk plate: %s | pattern=%s | frames=%s-%s",
+            "Desk plate: %s | pattern=%s | desk=%s-%s | run=%s-%s",
             first_path.relative_to(mount),
             pattern,
+            desk_f0,
+            desk_f1,
             f0,
             f1,
         )
     except ValueError:
-        _log.info("Desk plate: %s | pattern=%s | frames=%s-%s", first_path, pattern, f0, f1)
+        _log.info(
+            "Desk plate: %s | pattern=%s | desk=%s-%s | run=%s-%s",
+            first_path,
+            pattern,
+            desk_f0,
+            desk_f1,
+            f0,
+            f1,
+        )
     return plate_dir, pattern, (f0, f1), resolution, pixel_aspect
 
 
