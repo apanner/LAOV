@@ -22,6 +22,7 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 # Allow ``import laov_colab_run`` when executed as scripts/ai_matte_colab_run.py
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -65,6 +66,8 @@ AI_MATTE_DEFAULTS = {
     "use_plate_jpeg_cache": True,
     "plate_cache_keep": True,
     "plate_jpeg_quality": 92,
+    "plate_cache_workers": 8,
+    "sam3_load_workers": 8,
     # SAM3: auto downscale tracking when 4K×long clips would exceed ~14 GiB RAM.
     "sam3_max_plate_stack_gb": 14.0,
     # VDA-style: one Python process per shot (full RAM/GPU reset between shots).
@@ -211,10 +214,108 @@ def _stage_exr_count(output_dir: Path, subdir: str) -> int:
 
 
 def _plate_cache_count(output_dir: Path) -> int:
-    cache = output_dir / "_plate_jpeg_cache"
-    if not cache.is_dir():
-        return 0
-    return len(list(cache.glob("plate_*.jpg")))
+    from live_action_aov.passes.matte.vitmatte_plate_cache import plate_cache_frame_count
+
+    return plate_cache_frame_count(output_dir / "_plate_jpeg_cache")
+
+
+def _make_plate_reader(
+    plate_dir: Path,
+    pattern: str,
+    frame_range: tuple[int, int],
+    *,
+    display_transform: bool,
+    colorspace_s: str,
+    proxy_long_edge: int | None,
+) -> Any:
+    from live_action_aov.io.readers.display_transform_reader import DisplayTransformedReader
+    from live_action_aov.io.readers.oiio_exr import OIIOExrReader
+    from live_action_aov.io.readers.proxy import wrap_if_proxy
+
+    raw = OIIOExrReader(plate_dir, pattern)
+    raw = wrap_if_proxy(raw, proxy_long_edge)
+    if not display_transform:
+        return raw
+    reader = DisplayTransformedReader(
+        raw,
+        colorspace_override=colorspace_s if colorspace_s != "auto" else None,
+    )
+    reader.analyze(frame_range)
+    return reader
+
+
+def _prewarm_plate_jpeg_cache(
+    *,
+    plate_dir: Path,
+    pattern: str,
+    frame_range: tuple[int, int],
+    cache_dir: Path,
+    shared: dict,
+    display_transform: bool,
+    colorspace_s: str,
+    proxy_long_edge: int | None,
+) -> None:
+    """One parallel EXR→JPEG pass on Drive — SAM3 + refiners read JPEGs (GPU work starts sooner)."""
+    from live_action_aov.passes.matte.vitmatte_plate_cache import (
+        build_plate_jpeg_cache,
+        plate_cache_complete,
+    )
+
+    if plate_cache_complete(cache_dir, frame_range):
+        from live_action_aov.passes.matte.vitmatte_plate_cache import plate_cache_frame_count
+
+        _log.info(
+            "Plate JPEG cache ready (%d frames): %s",
+            plate_cache_frame_count(cache_dir),
+            cache_dir,
+        )
+        return
+    reader = _make_plate_reader(
+        plate_dir,
+        pattern,
+        frame_range,
+        display_transform=display_transform,
+        colorspace_s=colorspace_s,
+        proxy_long_edge=proxy_long_edge,
+    )
+    workers = max(1, int(shared.get("plate_cache_workers", 8)))
+    _log.info(
+        "Pre-building plate JPEG cache (%d parallel workers) — avoids slow SAM3 EXR loop",
+        workers,
+    )
+    build_plate_jpeg_cache(
+        reader.read_frame,
+        frame_range,
+        cache_dir,
+        jpeg_quality=int(shared.get("plate_jpeg_quality", 92)),
+        log_every=max(10, (frame_range[1] - frame_range[0] + 1) // 15),
+        log_label="Plate",
+        workers=workers,
+    )
+
+
+def _incomplete_matte_stages(
+    output_dir: Path,
+    frame_range: tuple[int, int],
+    shared: dict,
+) -> list[str]:
+    """Stage folder names still missing deliverable EXRs."""
+    f0, f1 = frame_range
+    n_frames = f1 - f0 + 1
+    missing: list[str] = []
+    if bool(shared.get("export_sam3_exr", True)) and not _stage_export_complete(
+        output_dir, "matte_sam3", n_frames
+    ):
+        missing.append("matte_sam3")
+    if bool(shared.get("export_birefnet_exr", True)) and not _stage_export_complete(
+        output_dir, "matte_birefnet", n_frames
+    ):
+        missing.append("matte_birefnet")
+    if bool(shared.get("export_vitmatte_exr", True)) and not _stage_export_complete(
+        output_dir, "matte_vitmatte", n_frames
+    ):
+        missing.append("matte_vitmatte")
+    return missing
 
 
 def _stage_export_complete(output_dir: Path, subdir: str, n_frames: int) -> bool:
@@ -865,6 +966,27 @@ def _run_sequences(
             k: v for k, v in stage_exports.items() if k in shot_pass_names
         }
 
+        if output_dir is not None and any(
+            p in shot_pass_names for p in ("sam3_matte", "birefnet_refiner", "vitmatte_refiner")
+        ):
+            try:
+                _prewarm_plate_jpeg_cache(
+                    plate_dir=plate_dir,
+                    pattern=pattern,
+                    frame_range=(f0, f1),
+                    cache_dir=(output_dir / "_plate_jpeg_cache").resolve(),
+                    shared=shared,
+                    display_transform=display_transform,
+                    colorspace_s=colorspace_s,
+                    proxy_long_edge=proxy_long_edge,
+                )
+            except Exception as exc:
+                _log.error("[%s] plate JPEG cache build failed: %s", shot_name, exc)
+                failed.append(shot_name)
+                if status:
+                    status.shot_end(shot_name, ok=False, message="plate cache failed")
+                continue
+
         write_final = bool(shared.get("export_final_exr", False)) or phase == "temporal"
         shot = Shot(
             name=shot_name,
@@ -894,11 +1016,22 @@ def _run_sequences(
                 sam3_model_dir=sam3_model_dir,
                 birefnet_model_dir=birefnet_model_dir,
             )
-            if output_dir is not None and name in ("birefnet_refiner", "vitmatte_refiner"):
+            if output_dir is not None and name in (
+                "sam3_matte",
+                "birefnet_refiner",
+                "vitmatte_refiner",
+            ):
                 cache_dir = (output_dir / "_plate_jpeg_cache").resolve()
                 params.setdefault("use_plate_jpeg_cache", True)
                 params.setdefault("plate_cache_dir", str(cache_dir))
                 params.setdefault("plate_cache_keep", True)
+                params.setdefault(
+                    "plate_cache_workers", int(shared.get("plate_cache_workers", 8))
+                )
+                if name == "sam3_matte":
+                    params.setdefault(
+                        "sam3_load_workers", int(shared.get("sam3_load_workers", 8))
+                    )
             pass_configs.append(PassConfig(name=name, params=params))
         post_configs: list[PostConfig] = []
         if phase == "temporal" or (
@@ -949,28 +1082,48 @@ def _run_sequences(
             failed.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=False, message=str(shot.status))
+        elif output_dir is not None:
+            missing_stages = _incomplete_matte_stages(output_dir, (f0, f1), shared)
+            if missing_stages:
+                _log.error(
+                    "[%s] incomplete matte stages on Drive: %s — re-run Cell 3 to resume",
+                    shot_name,
+                    ", ".join(missing_stages),
+                )
+                failed.append(shot_name)
+                if status:
+                    status.shot_end(shot_name, ok=False, message="incomplete stages")
+            else:
+                _log.info(
+                    "Done shot=%s — matte_sam3 + matte_birefnet + matte_vitmatte complete",
+                    shot_name,
+                )
+                succeeded.append(shot_name)
+                if status:
+                    status.shot_end(shot_name, ok=True)
         else:
             _log.info("Done shot=%s", shot_name)
             succeeded.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=True)
-            if output_dir and bool(shared.get("qc_mp4", True)):
-                try:
-                    if status:
-                        status.stage(f"{shot_name}: QC MP4 export", shot_name=shot_name)
-                    from ai_matte_qc_mp4 import export_all_stage_qc_mp4s
 
-                    fps = float(shared.get("fps") or shared.get("frame_rate") or 24.0)
-                    export_all_stage_qc_mp4s(
-                        output_dir,
-                        plate_dir=plate_dir,
-                        sequence_pattern=pattern,
-                        frame_range=(f0, f1),
-                        fps=fps,
-                        refiner=refiner,
-                    )
-                except Exception as exc:
-                    _log.warning("QC MP4 export failed for %s: %s", shot_name, exc)
+        if shot_name in succeeded and output_dir and bool(shared.get("qc_mp4", True)):
+            try:
+                if status:
+                    status.stage(f"{shot_name}: QC MP4 export", shot_name=shot_name)
+                from ai_matte_qc_mp4 import export_all_stage_qc_mp4s
+
+                fps = float(shared.get("fps") or shared.get("frame_rate") or 24.0)
+                export_all_stage_qc_mp4s(
+                    output_dir,
+                    plate_dir=plate_dir,
+                    sequence_pattern=pattern,
+                    frame_range=(f0, f1),
+                    fps=fps,
+                    refiner=refiner,
+                )
+            except Exception as exc:
+                _log.warning("QC MP4 export failed for %s: %s", shot_name, exc)
 
     print("\n" + "=" * 60, flush=True)
     print("BATCH SUMMARY", flush=True)

@@ -244,6 +244,7 @@ class ViTMatteRefinerPass(UtilityPass):
             jpeg_quality=int(self.params.get("plate_jpeg_quality", 92)),
             log_every=max(10, n // 20),
             log_label="ViTMatte",
+            workers=int(self.params.get("plate_cache_workers", 8)),
         )
         return cache_dir
 

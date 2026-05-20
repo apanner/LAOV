@@ -246,12 +246,20 @@ class SAM3MattePass(UtilityPass):
         "sam3_max_plate_stack_gb": 14.0,
         # Optional SAM3-only long edge (deliverable masks are still upscaled to full plate).
         "sam3_proxy_long_edge": None,
+        # Fast I/O: read JPEG cache on Drive instead of sequential EXR (built once per shot).
+        "use_plate_jpeg_cache": True,
+        "plate_cache_dir": None,
+        "plate_jpeg_quality": 92,
+        "sam3_load_workers": 8,
     }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
         super().__init__(params)
         for k, v in self.DEFAULT_PARAMS.items():
             self.params.setdefault(k, v)
+        # Colab / Desk may set plate_cache_dir on the pass without listing every default key.
+        self.params.setdefault("use_plate_jpeg_cache", True)
+        self.params.setdefault("sam3_load_workers", 8)
         self._model: Any = None
         self._device: Any = None
         self._dtype: Any = None
@@ -718,8 +726,17 @@ class SAM3MattePass(UtilityPass):
                 last,
                 est_gib,
             )
+        cache_dir = self.params.get("plate_cache_dir")
+        use_cache = bool(self.params.get("use_plate_jpeg_cache", True)) and cache_dir
         frames = _build_sam3_plate_stack(
-            reader, first, last, work_h=work_h, work_w=work_w
+            reader,
+            first,
+            last,
+            work_h=work_h,
+            work_w=work_w,
+            cache_dir=Path(str(cache_dir)).resolve() if use_cache else None,
+            jpeg_quality=int(self.params.get("plate_jpeg_quality", 92)),
+            load_workers=int(self.params.get("sam3_load_workers", 8)),
         )
         _log.info("SAM3: plate stack %s — detect & track", frames.shape)
 
@@ -1059,11 +1076,72 @@ def _build_sam3_plate_stack(
     *,
     work_h: int,
     work_w: int,
+    cache_dir: Path | None = None,
+    jpeg_quality: int = 92,
+    load_workers: int = 8,
 ) -> np.ndarray:
-    """One frame at a time — avoids holding a list of full-res arrays."""
+    """Build SAM3 working stack — prefer parallel JPEG cache over slow per-frame EXR."""
+    from pathlib import Path as _Path
+
+    from live_action_aov.passes.matte.vitmatte_plate_cache import (
+        build_plate_jpeg_cache,
+        plate_cache_complete,
+        read_plate_jpeg,
+    )
+
     n_frames = last - first + 1
     stack = np.empty((n_frames, work_h, work_w, 3), dtype=np.float32)
     log_step = max(1, n_frames // 10)
+
+    if cache_dir is not None:
+        cache_dir = _Path(cache_dir)
+        if not plate_cache_complete(cache_dir, (first, last)):
+            _log.info(
+                "SAM3: building plate JPEG cache (%d workers) before stack — much faster than EXR×%d",
+                max(1, load_workers),
+                n_frames,
+            )
+            build_plate_jpeg_cache(
+                reader.read_frame,
+                (first, last),
+                cache_dir,
+                jpeg_quality=jpeg_quality,
+                log_every=max(10, n_frames // 15),
+                log_label="SAM3",
+                workers=max(1, load_workers),
+            )
+        else:
+            _log.info("SAM3: using existing plate JPEG cache at %s", cache_dir)
+        for i, frame_idx in enumerate(range(first, last + 1)):
+            if i == 0 or i == n_frames - 1 or (i + 1) % log_step == 0:
+                _log.info("SAM3: stack from cache %d/%d (frame %s)", i + 1, n_frames, frame_idx)
+            rgb = read_plate_jpeg(cache_dir, frame_idx)
+            stack[i] = _resize_rgb_plane(rgb, work_h, work_w)
+        return stack
+
+    if load_workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        _log.info("SAM3: parallel EXR load %d frames, %d workers", n_frames, load_workers)
+
+        def _load(i: int, frame_idx: int) -> tuple[int, np.ndarray]:
+            rgb, _attrs = reader.read_frame(frame_idx)
+            return i, _resize_rgb_plane(rgb, work_h, work_w)
+
+        with ThreadPoolExecutor(max_workers=load_workers) as pool:
+            futures = [
+                pool.submit(_load, i, frame_idx)
+                for i, frame_idx in enumerate(range(first, last + 1))
+            ]
+            done = 0
+            for fut in as_completed(futures):
+                i, plane = fut.result()
+                stack[i] = plane
+                done += 1
+                if done == 1 or done == n_frames or done % log_step == 0:
+                    _log.info("SAM3: loaded %d/%d plates", done, n_frames)
+        return stack
+
     for i, frame_idx in enumerate(range(first, last + 1)):
         if i == 0 or i == n_frames - 1 or (i + 1) % log_step == 0:
             _log.info("SAM3: loading plate %d/%d (frame %s)", i + 1, n_frames, frame_idx)

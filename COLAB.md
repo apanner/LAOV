@@ -174,6 +174,16 @@ Per shot on Drive: `MyDrive/VDA_output/<date>/AI_MATTE_output/<shot_name>/`
 
 Re-run Cell 3 logs `Resume scan — destination: …` then `Next passes: birefnet_refiner, vitmatte_refiner`.
 
+### Fast plate loading (Colab / high-RAM GPU)
+
+SAM3 used to read **one EXR at a time** from Drive (~4 s/frame at 4K) while the GPU sat idle. Now:
+
+1. **`Pre-building plate JPEG cache (8 parallel workers)`** — one parallel EXR→JPEG pass under `_plate_jpeg_cache/`
+2. **SAM3** reads JPEGs + resizes to tracking resolution (much faster than OIIO EXR per frame)
+3. **BiRefNet / ViTMatte** reuse the same cache at full res
+
+Tune in Desk JSON `shared_settings`: `plate_cache_workers` (default 8), `sam3_load_workers` (default 8). Shot fails at end if any of `matte_sam3/`, `matte_birefnet/`, `matte_vitmatte/` is missing EXRs for the frame range.
+
 Example QC MP4:
 
 ```text

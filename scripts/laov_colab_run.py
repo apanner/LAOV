@@ -146,7 +146,15 @@ def _matte_pass_params(
             params["sample_frame"] = matte["sample_frame"]
         if matte.get("confidence_threshold") is not None:
             params["confidence_threshold"] = matte["confidence_threshold"]
-        for key in ("sam3_max_plate_stack_gb", "sam3_proxy_long_edge"):
+        for key in (
+            "sam3_max_plate_stack_gb",
+            "sam3_proxy_long_edge",
+            "use_plate_jpeg_cache",
+            "plate_cache_dir",
+            "plate_jpeg_quality",
+            "sam3_load_workers",
+            "plate_cache_workers",
+        ):
             val = matte.get(key, shared.get(key))
             if val is not None:
                 params[key] = val
@@ -229,6 +237,7 @@ def _matte_pass_params(
             "plate_cache_dir",
             "plate_cache_keep",
             "plate_jpeg_quality",
+            "plate_cache_workers",
         ):
             val = matte.get(key, shared.get(key))
             if val is not None:
