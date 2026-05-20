@@ -210,8 +210,51 @@ def _stage_exr_count(output_dir: Path, subdir: str) -> int:
     return len(list(d.glob("*.exr")))
 
 
+def _plate_cache_count(output_dir: Path) -> int:
+    cache = output_dir / "_plate_jpeg_cache"
+    if not cache.is_dir():
+        return 0
+    return len(list(cache.glob("plate_*.jpg")))
+
+
 def _stage_export_complete(output_dir: Path, subdir: str, n_frames: int) -> bool:
     return _stage_exr_count(output_dir, subdir) >= n_frames
+
+
+def _log_stage_scan(output_dir: Path, frame_range: tuple[int, int]) -> None:
+    """Print what is already on Drive (no copying — same destination tree)."""
+    from live_action_aov.io.sam3_artifact_io import sam3_artifact_path
+
+    f0, f1 = frame_range
+    n_frames = f1 - f0 + 1
+    sam3_stage = output_dir / "matte_sam3"
+    npz = sam3_artifact_path(sam3_stage)
+    _log.info(
+        "Resume scan — destination: %s  frames=%s-%s (%d)",
+        output_dir,
+        f0,
+        f1,
+        n_frames,
+    )
+    _log.info(
+        "  matte_sam3/     %d EXR(s)  NPZ=%s",
+        _stage_exr_count(output_dir, "matte_sam3"),
+        "yes" if npz.is_file() else "no",
+    )
+    _log.info(
+        "  matte_birefnet/ %d EXR(s)  (need %d to skip BiRefNet)",
+        _stage_exr_count(output_dir, "matte_birefnet"),
+        n_frames,
+    )
+    _log.info(
+        "  matte_vitmatte/ %d EXR(s)  (need %d to skip ViTMatte)",
+        _stage_exr_count(output_dir, "matte_vitmatte"),
+        n_frames,
+    )
+    _log.info(
+        "  _plate_jpeg_cache/ %d JPEG(s) (work cache for refiners; rebuilt if incomplete)",
+        _plate_cache_count(output_dir),
+    )
 
 
 def _plan_stage_passes(
@@ -221,7 +264,17 @@ def _plan_stage_passes(
     phase: str,
     frame_range: tuple[int, int],
 ) -> tuple[list[str], Path | None]:
-    """Skip stages already on Drive; preload SAM3 NPZ when resuming after SAM3-only run."""
+    """Skip passes whose outputs already exist under ``output_dir`` on Drive.
+
+    Nothing is copied or moved between folders. Each pass writes in place:
+
+    - ``matte_sam3/`` — combined matte EXRs + ``_sam3_artifacts.npz`` (masks for refiners)
+    - ``matte_birefnet/``, ``matte_vitmatte/`` — combined matte EXRs per stage
+    - ``_plate_jpeg_cache/`` — optional full-res JPEG plate cache (refiners read plates)
+
+    SAM3 skip uses the **NPZ** (refiners need hard masks). EXR count is logged;
+    refiners skip only when their folder has ``>= n_frames`` ``*.exr``.
+    """
     if output_dir is None:
         return pass_names, None
     from live_action_aov.io.sam3_artifact_io import sam3_artifact_path
@@ -229,37 +282,62 @@ def _plan_stage_passes(
     f0, f1 = frame_range
     n_frames = f1 - f0 + 1
     sam3_stage = (output_dir / "matte_sam3").resolve()
-    artifact = sam3_artifact_path(sam3_stage)
+    npz_path = sam3_artifact_path(sam3_stage)
+    has_npz = npz_path.is_file()
     planned = list(pass_names)
     preload: Path | None = None
 
+    _log_stage_scan(output_dir, frame_range)
+
     if phase == "refine":
-        if artifact.is_file():
+        if has_npz:
             preload = sam3_stage
             if "sam3_matte" in planned:
                 planned.remove("sam3_matte")
         return planned, preload
 
-    if phase != "stages" or not artifact.is_file():
+    if phase != "stages":
         return planned, None
 
-    if "sam3_matte" in planned and _stage_export_complete(output_dir, "matte_sam3", n_frames):
-        _log.info(
-            "[%s] SAM3 already exported (%d EXRs) — skipping sam3_matte, running refiners only",
-            output_dir.name,
-            _stage_exr_count(output_dir, "matte_sam3"),
-        )
+    # --- SAM3: NPZ is required to run BiRefNet/ViTMatte without re-tracking ---
+    if "sam3_matte" in planned and has_npz:
+        exr_n = _stage_exr_count(output_dir, "matte_sam3")
+        if exr_n >= n_frames:
+            _log.info(
+                "Skip sam3_matte — NPZ + %d/%d EXRs already in matte_sam3/",
+                exr_n,
+                n_frames,
+            )
+        else:
+            _log.warning(
+                "Skip sam3_matte — NPZ present but only %d/%d EXRs in matte_sam3/ "
+                "(refiners use NPZ; re-export SAM3 EXRs only if you need them)",
+                exr_n,
+                n_frames,
+            )
         planned.remove("sam3_matte")
         preload = sam3_stage
-    if "birefnet_refiner" in planned and _stage_export_complete(output_dir, "matte_birefnet", n_frames):
-        _log.info("Resume: matte_birefnet complete — skipping BiRefNet")
+
+    if "birefnet_refiner" in planned and _stage_export_complete(
+        output_dir, "matte_birefnet", n_frames
+    ):
+        _log.info(
+            "Skip birefnet_refiner — matte_birefnet/ has %d EXRs",
+            _stage_exr_count(output_dir, "matte_birefnet"),
+        )
         planned.remove("birefnet_refiner")
-    if "vitmatte_refiner" in planned and _stage_export_complete(output_dir, "matte_vitmatte", n_frames):
-        _log.info("Resume: matte_vitmatte complete — skipping ViTMatte")
+
+    if "vitmatte_refiner" in planned and _stage_export_complete(
+        output_dir, "matte_vitmatte", n_frames
+    ):
+        _log.info(
+            "Skip vitmatte_refiner — matte_vitmatte/ has %d EXRs",
+            _stage_exr_count(output_dir, "matte_vitmatte"),
+        )
         planned.remove("vitmatte_refiner")
 
     if preload and planned:
-        _log.info("Resume after SAM3 — remaining passes: %s", ", ".join(planned))
+        _log.info("Next passes (in place on Drive): %s", ", ".join(planned))
     return planned, preload
 
 

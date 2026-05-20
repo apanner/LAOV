@@ -158,7 +158,21 @@ MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_0
 | Multi-shot batch stops at first failure | Old in-process batch | Default **`batch_one_process_per_shot: true`**: each shot runs in a **new Python process** (like VDA). Failed shots are skipped; others continue. See **BATCH SUMMARY** at end. |
 | Cell 3 shows `[STOP]` with no error above | Buffered subprocess output | Re-upload cellcode from Desk (streams runner with `python -u`). Look for `[ai_matte_colab_run] starting` and `ERROR` lines. |
 | Long shot “times out” / stalls on BiRefNet read | Old build loaded all EXR into RAM | **BiRefNet streams** one frame at a time + `_plate_jpeg_cache` on Drive. Logs every ~20 frames. `[STAGE] keepalive …` every 90s fights Colab idle disconnect. |
-| Only `matte_sam3/`, no BiRefNet or ViTMatte | Job died during refiner (OOM/timeout) **or** `matte_pipeline_phase=sam3` | Check log for `Phase stages — passes: sam3_matte, birefnet_refiner, vitmatte_refiner`. Re-run **Cell 3** with same JSON — **auto-resumes** refiners if `matte_sam3/` + `_sam3_artifacts.npz` exist. Desk phase must be **stages**, not **sam3 only**. |
+| Only `matte_sam3/`, no BiRefNet or ViTMatte | Job died during refiner (OOM/timeout) **or** `matte_pipeline_phase=sam3` | Re-run **Cell 3** (same JSON). **No file copying** — runner scans the shot folder on Drive and skips finished stages. Needs `matte_sam3/_sam3_artifacts.npz` to skip SAM3; needs `matte_birefnet/*.exr` (count = frame range) to skip BiRefNet; same for `matte_vitmatte/`. `_plate_jpeg_cache/` is rebuilt if incomplete. |
+
+### Resume / destination layout (no copy)
+
+Per shot on Drive: `MyDrive/VDA_output/<date>/AI_MATTE_output/<shot_name>/`
+
+| Path | Purpose | Skip next stage when |
+|------|---------|----------------------|
+| `matte_sam3/*.exr` | QC / Nuke combined mattes | (logged; not required for skip) |
+| `matte_sam3/_sam3_artifacts.npz` | Hard masks for BiRefNet/ViTMatte | NPZ exists → skip **sam3_matte** |
+| `matte_birefnet/*.exr` | BiRefNet deliverables | EXR count ≥ frame count → skip **birefnet_refiner** |
+| `matte_vitmatte/*.exr` | ViTMatte deliverables | EXR count ≥ frame count → skip **vitmatte_refiner** |
+| `_plate_jpeg_cache/plate_*.jpg` | Refiner plate reads (not a deliverable) | Reused if present; missing frames re-encoded |
+
+Re-run Cell 3 logs `Resume scan — destination: …` then `Next passes: birefnet_refiner, vitmatte_refiner`.
 
 Example QC MP4:
 
