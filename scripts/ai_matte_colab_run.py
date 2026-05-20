@@ -51,7 +51,7 @@ AI_MATTE_DEFAULTS = {
     "propagation_mode": "nearest_anchor",
     "export_sam3_exr": True,
     "export_birefnet_exr": True,
-    "export_vitmatte_exr": False,
+    "export_vitmatte_exr": True,
     "export_final_exr": False,
     "export_flow_exr": False,
     "run_matte_flow_temporal": False,
@@ -114,7 +114,7 @@ def _refiners_from_exports(shared: dict) -> list[str]:
     names: list[str] = []
     if bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner":
         names.append("birefnet_refiner")
-    if bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner":
+    if bool(shared.get("export_vitmatte_exr", True)) or refiner == "vitmatte_refiner":
         names.append("vitmatte_refiner")
     if refiner == "rvm_refiner":
         names.append("rvm_refiner")
@@ -143,15 +143,11 @@ def _build_ai_matte_pass_names(shared: dict, *, phase: str) -> list[str]:
         return ["sam3_matte"]
 
     if phase == "refine":
-        names: list[str] = []
-        if refiner == "birefnet_refiner":
-            names.append("birefnet_refiner")
-        elif refiner == "vitmatte_refiner":
-            names.append("vitmatte_refiner")
-        elif refiner == "rvm_refiner":
-            names.append("rvm_refiner")
-        else:
-            names.append(refiner)
+        # Run every checked refiner (Desk export checkboxes), not only the active refiner combo.
+        names = _refiners_from_exports(shared)
+        if not names:
+            _log.warning("refine phase: no export_*_exr enabled — defaulting to %s", refiner)
+            names = [refiner]
         return names
 
     if phase == "temporal":
@@ -168,10 +164,10 @@ def _build_ai_matte_pass_names(shared: dict, *, phase: str) -> list[str]:
         need_flow = bool(shared.get("export_flow_exr", False))
     if need_flow:
         names.insert(0, "flow")
-    if bool(shared.get("export_birefnet_exr", False)) or refiner == "birefnet_refiner":
+    if bool(shared.get("export_birefnet_exr", True)) or refiner == "birefnet_refiner":
         if "birefnet_refiner" not in names:
             names.append("birefnet_refiner")
-    if bool(shared.get("export_vitmatte_exr", False)) or refiner == "vitmatte_refiner":
+    if bool(shared.get("export_vitmatte_exr", True)) or refiner == "vitmatte_refiner":
         if "vitmatte_refiner" not in names:
             names.append("vitmatte_refiner")
     if refiner == "rvm_refiner" and "rvm_refiner" not in names:
@@ -191,12 +187,11 @@ def _stage_export_map(shared: dict, *, phase: str) -> dict[str, str]:
     elif phase == "sam3" and shared.get("export_sam3_exr", True):
         exports["sam3_matte"] = "matte_sam3"
     elif phase == "refine":
-        refiner = str(shared.get("refiner", "birefnet_refiner"))
-        if refiner == "birefnet_refiner" and shared.get("export_birefnet_exr", True):
+        if shared.get("export_birefnet_exr", True):
             exports["birefnet_refiner"] = "matte_birefnet"
-        elif refiner == "vitmatte_refiner" and shared.get("export_vitmatte_exr", True):
+        if shared.get("export_vitmatte_exr", True):
             exports["vitmatte_refiner"] = "matte_vitmatte"
-        elif refiner == "rvm_refiner":
+        if shared.get("export_rvm_exr", False):
             exports["rvm_refiner"] = "matte"
     elif phase == "all":
         if shared.get("export_sam3_exr", True):
@@ -206,6 +201,66 @@ def _stage_export_map(shared: dict, *, phase: str) -> dict[str, str]:
         if shared.get("export_vitmatte_exr", True):
             exports["vitmatte_refiner"] = "matte_vitmatte"
     return exports
+
+
+def _stage_exr_count(output_dir: Path, subdir: str) -> int:
+    d = output_dir / subdir
+    if not d.is_dir():
+        return 0
+    return len(list(d.glob("*.exr")))
+
+
+def _stage_export_complete(output_dir: Path, subdir: str, n_frames: int) -> bool:
+    return _stage_exr_count(output_dir, subdir) >= n_frames
+
+
+def _plan_stage_passes(
+    output_dir: Path | None,
+    pass_names: list[str],
+    *,
+    phase: str,
+    frame_range: tuple[int, int],
+) -> tuple[list[str], Path | None]:
+    """Skip stages already on Drive; preload SAM3 NPZ when resuming after SAM3-only run."""
+    if output_dir is None:
+        return pass_names, None
+    from live_action_aov.io.sam3_artifact_io import sam3_artifact_path
+
+    f0, f1 = frame_range
+    n_frames = f1 - f0 + 1
+    sam3_stage = (output_dir / "matte_sam3").resolve()
+    artifact = sam3_artifact_path(sam3_stage)
+    planned = list(pass_names)
+    preload: Path | None = None
+
+    if phase == "refine":
+        if artifact.is_file():
+            preload = sam3_stage
+            if "sam3_matte" in planned:
+                planned.remove("sam3_matte")
+        return planned, preload
+
+    if phase != "stages" or not artifact.is_file():
+        return planned, None
+
+    if "sam3_matte" in planned and _stage_export_complete(output_dir, "matte_sam3", n_frames):
+        _log.info(
+            "[%s] SAM3 already exported (%d EXRs) — skipping sam3_matte, running refiners only",
+            output_dir.name,
+            _stage_exr_count(output_dir, "matte_sam3"),
+        )
+        planned.remove("sam3_matte")
+        preload = sam3_stage
+    if "birefnet_refiner" in planned and _stage_export_complete(output_dir, "matte_birefnet", n_frames):
+        _log.info("Resume: matte_birefnet complete — skipping BiRefNet")
+        planned.remove("birefnet_refiner")
+    if "vitmatte_refiner" in planned and _stage_export_complete(output_dir, "matte_vitmatte", n_frames):
+        _log.info("Resume: matte_vitmatte complete — skipping ViTMatte")
+        planned.remove("vitmatte_refiner")
+
+    if preload and planned:
+        _log.info("Resume after SAM3 — remaining passes: %s", ", ".join(planned))
+    return planned, preload
 
 
 def _should_run_matte_temporal(shared: dict) -> bool:
@@ -596,15 +651,26 @@ def _run_sequences(
 
     pass_names = _build_ai_matte_pass_names(shared, phase=phase)
     vit_dir = lcr._resolve_vitmatte_model_dir(mount, shared)
-    if "vitmatte_refiner" in pass_names and not vit_dir:
-        _log.warning("ViTMatte model not on Drive — skipping vitmatte_refiner")
-        pass_names = [p for p in pass_names if p != "vitmatte_refiner"]
-    elif vit_dir:
-        os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vit_dir
+    if "vitmatte_refiner" in pass_names:
+        if vit_dir:
+            os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vit_dir
+        elif bool(shared.get("export_vitmatte_exr", True)):
+            _log.error(
+                "ViTMatte requested (export_vitmatte_exr) but model not on Drive. "
+                "Upload MyDrive/VDA_models/hustvl/vitmatte-base-composition-1k/ "
+                "or uncheck ViTMatte in Desk and re-send job."
+            )
+            return 1
+        else:
+            pass_names = [p for p in pass_names if p != "vitmatte_refiner"]
 
     stage_exports = _stage_export_map(shared, phase=phase)
     if "vitmatte_refiner" not in pass_names:
         stage_exports.pop("vitmatte_refiner", None)
+    if phase == "sam3":
+        _log.warning(
+            "matte_pipeline_phase=sam3 — ONLY SAM3 runs. Use 'stages' for SAM3+BiRefNet+ViTMatte."
+        )
     _log.info("Phase %s — passes: %s", phase, ", ".join(pass_names))
     _log.info(
         "Exports: sam3=%s birefnet=%s vitmatte=%s qc_mp4=%s",
@@ -687,14 +753,21 @@ def _run_sequences(
         if probe_first_frame:
             _probe_plate_read(plate_dir, pattern, f0)
 
+        shot_pass_names = list(pass_names)
         preload_sam3_dir = None
-        if phase == "refine" and output_dir is not None:
+        if output_dir is not None and phase in ("stages", "refine"):
             from live_action_aov.io.sam3_artifact_io import sam3_artifact_path
 
-            sam3_stage = (output_dir / "matte_sam3").resolve()
-            if not sam3_artifact_path(sam3_stage).is_file():
+            shot_pass_names, preload_sam3_dir = _plan_stage_passes(
+                output_dir,
+                shot_pass_names,
+                phase=phase,
+                frame_range=(f0, f1),
+            )
+            if phase == "refine" and preload_sam3_dir is None:
+                sam3_stage = (output_dir / "matte_sam3").resolve()
                 _log.error(
-                    "%s: missing %s — run Colab with matte_pipeline_phase=sam3 first",
+                    "%s: missing %s — run stages first or re-run Cell 3 (auto-resumes refiners)",
                     shot_name,
                     sam3_artifact_path(sam3_stage),
                 )
@@ -702,7 +775,17 @@ def _run_sequences(
                 if status:
                     status.shot_end(shot_name, ok=False, message="SAM3 artifacts missing")
                 continue
-            preload_sam3_dir = sam3_stage
+
+        if not shot_pass_names:
+            _log.info("[%s] all stage EXRs already on Drive — skip engine", shot_name)
+            succeeded.append(shot_name)
+            if status:
+                status.shot_end(shot_name, ok=True, message="already complete")
+            continue
+
+        shot_stage_exports = {
+            k: v for k, v in stage_exports.items() if k in shot_pass_names
+        }
 
         write_final = bool(shared.get("export_final_exr", False)) or phase == "temporal"
         shot = Shot(
@@ -718,14 +801,14 @@ def _run_sequences(
             output_dir=output_dir,
             proxy_long_edge=proxy_long_edge,
             output_layout=output_layout,  # type: ignore[arg-type]
-            pass_export_subdirs=stage_exports,
+            pass_export_subdirs=shot_stage_exports,
             write_final_sidecars=write_final,
             preload_sam3_artifacts_dir=preload_sam3_dir,
         )
         if vitmatte_model_dir:
             os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vitmatte_model_dir
         pass_configs = []
-        for name in pass_names:
+        for name in shot_pass_names:
             params = lcr._matte_pass_params(
                 name,
                 shared,
@@ -754,15 +837,16 @@ def _run_sequences(
         try:
             if status:
                 status.stage(
-                    f"{shot_name}: engine — {', '.join(pass_names)}",
+                    f"{shot_name}: engine — {', '.join(shot_pass_names)}",
                     shot_name=shot_name,
                 )
             laov_run(job, progress_callback=progress_cb)
         except MemoryError:
             _log.error(
-                "[%s] out of memory — skipping shot (others continue). "
-                "Long 4K: sam3_max_plate_stack_gb auto-downscale is on; try proxy in Desk.",
+                "[%s] out of memory — SAM3 may already be on Drive under %s/matte_sam3/. "
+                "Re-run Cell 3 (same JSON): auto-resumes BiRefNet + ViTMatte only.",
                 shot_name,
+                output_dir or "?",
             )
             failed.append(shot_name)
             if status:
@@ -770,7 +854,12 @@ def _run_sequences(
             _between_shots_cleanup()
             continue
         except Exception:
-            _log.error("Run failed for %s:\n%s", shot_name, traceback.format_exc())
+            _log.error(
+                "Run failed for %s:\n%s\n"
+                "If matte_sam3/ exists, re-run Cell 3 — refiners resume automatically.",
+                shot_name,
+                traceback.format_exc(),
+            )
             failed.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=False, message="engine error")
