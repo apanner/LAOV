@@ -122,7 +122,29 @@ class LocalExecutor(Executor):
             resolved.append((pc, registry.get_pass(pc.name)))
 
         nodes = [_node_for(pc, cls) for (pc, cls) in resolved]
-        ordered = topological_sort(nodes)
+
+        # Preload SAM3 NPZ before DAG sort (resume: sam3_matte skipped but refiners need masks).
+        artifacts: dict[str, dict[int, Any]] = {}
+        satisfied: set[str] = set()
+        if shot.preload_sam3_artifacts_dir is not None:
+            from live_action_aov.io.sam3_artifact_io import load_sam3_artifacts
+
+            loaded = load_sam3_artifacts(shot.preload_sam3_artifacts_dir)
+            if loaded is None:
+                raise FileNotFoundError(
+                    f"SAM3 artifacts not found under {shot.preload_sam3_artifacts_dir}. "
+                    "Run the SAM3 Colab phase first."
+                )
+            for art_name, per_frame in loaded.items():
+                artifacts.setdefault(art_name, {}).update(per_frame)
+                satisfied.add(art_name)
+            _log.info(
+                "Preloaded SAM3 artifacts from %s → %s",
+                shot.preload_sam3_artifacts_dir,
+                ", ".join(sorted(satisfied)),
+            )
+
+        ordered = topological_sort(nodes, satisfied_artifacts=frozenset(satisfied))
         resolved_by_name = {pc.name: (pc, cls) for (pc, cls) in resolved}
 
         raw_reader: Any = OIIOExrReader(shot.folder, shot.sequence_pattern)
@@ -152,20 +174,7 @@ class LocalExecutor(Executor):
             reader = raw_reader
         writer = ExrSidecarWriter()
 
-        # Shared state published between passes and post-processors.
-        artifacts: dict[str, dict[int, Any]] = {}
         flow_cache = FlowCache()
-        if shot.preload_sam3_artifacts_dir is not None:
-            from live_action_aov.io.sam3_artifact_io import load_sam3_artifacts
-
-            loaded = load_sam3_artifacts(shot.preload_sam3_artifacts_dir)
-            if loaded is None:
-                raise FileNotFoundError(
-                    f"SAM3 artifacts not found under {shot.preload_sam3_artifacts_dir}. "
-                    "Run the SAM3 Colab phase first."
-                )
-            for art_name, per_frame in loaded.items():
-                artifacts.setdefault(art_name, {}).update(per_frame)
 
         try:
             shot.status = "running"

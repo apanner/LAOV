@@ -48,14 +48,22 @@ class PassNode:
     requires: tuple[str, ...]
 
 
-def topological_sort(nodes: list[PassNode]) -> list[PassNode]:
+def topological_sort(
+    nodes: list[PassNode],
+    *,
+    satisfied_artifacts: frozenset[str] | None = None,
+) -> list[PassNode]:
     """Return `nodes` in execution order.
 
     Independent nodes preserve their input order so deterministic YAML ->
     deterministic execution. If an artifact is produced by more than one
     node, the first in input order wins (warn upstream if that's actually
     ambiguous — the scheduler does not decide).
+
+    ``satisfied_artifacts`` — artifact names already available (e.g. SAM3 NPZ
+    loaded from Drive on resume) even when the producing pass is not scheduled.
     """
+    preloaded = satisfied_artifacts or frozenset()
     # Map each artifact to the first provider node.
     producer_of: dict[str, PassNode] = {}
     for node in nodes:
@@ -69,6 +77,8 @@ def topological_sort(nodes: list[PassNode]) -> list[PassNode]:
 
     for node in nodes:
         for art in node.requires:
+            if art in preloaded:
+                continue
             provider = producer_of.get(art)
             if provider is None:
                 raise MissingArtifactError(

@@ -174,6 +174,8 @@ Per shot on Drive: `MyDrive/VDA_output/<date>/AI_MATTE_output/<shot_name>/`
 
 Re-run Cell 3 logs `Resume scan — destination: …` then `Next passes: birefnet_refiner, vitmatte_refiner`.
 
+| `MissingArtifactError: sam3_hard_masks` on resume | DAG ran before NPZ load | Fixed: preload `_sam3_artifacts.npz` **before** DAG sort. Log: `Preloaded SAM3 artifacts from …/matte_sam3/`. Pull LAOV after `85619e7+`. |
+
 ### Fast plate loading (Colab / high-RAM GPU)
 
 SAM3 used to read **one EXR at a time** from Drive (~4 s/frame at 4K) while the GPU sat idle. Now:

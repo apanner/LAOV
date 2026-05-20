@@ -39,6 +39,19 @@ def test_missing_artifact_raises() -> None:
         topological_sort([_node("x", requires=("nowhere",))])
 
 
+def test_topological_sort_accepts_preloaded_artifacts() -> None:
+    """Resume path: refiners only, SAM3 masks loaded from Drive NPZ."""
+    birefnet = _node(
+        "birefnet_refiner",
+        requires=("sam3_hard_masks", "sam3_instances"),
+    )
+    ordered = topological_sort(
+        [birefnet],
+        satisfied_artifacts=frozenset({"sam3_hard_masks", "sam3_instances"}),
+    )
+    assert [n.name for n in ordered] == ["birefnet_refiner"]
+
+
 def test_cycle_raises() -> None:
     a = _node("a", provides=("x",), requires=("y",))
     b = _node("b", provides=("y",), requires=("x",))
