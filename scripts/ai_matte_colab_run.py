@@ -66,6 +66,9 @@ AI_MATTE_DEFAULTS = {
     "plate_jpeg_quality": 92,
     # SAM3: auto downscale tracking when 4K×long clips would exceed ~14 GiB RAM.
     "sam3_max_plate_stack_gb": 14.0,
+    # VDA-style: one Python process per shot (full RAM/GPU reset between shots).
+    "batch_one_process_per_shot": True,
+    "batch_gap_seconds": 5,
 }
 
 
@@ -86,6 +89,13 @@ def _parse_args() -> argparse.Namespace:
         choices=("stages", "sam3", "refine", "temporal", "all"),
         default=None,
         help="Pipeline phase (overrides batch JSON matte_pipeline_phase).",
+    )
+    p.add_argument(
+        "--shot-index",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Run only sequences[N] from the batch JSON (used internally for one-shot-per-process batch).",
     )
     return p.parse_args()
 
@@ -301,6 +311,7 @@ def _probe_plate_read(plate_dir: Path, pattern: str, frame: int) -> None:
 
 def main() -> int:
     configure_flushed_logging()
+    print("[ai_matte_colab_run] starting…", flush=True)
     args = _parse_args()
     job_path = Path(args.job_json).resolve()
     if not job_path.is_file():
@@ -384,11 +395,40 @@ def main() -> int:
         _log.error("No sequences in job JSON")
         return 1
 
+    if args.shot_index is not None:
+        if args.shot_index < 0 or args.shot_index >= len(sequences):
+            _log.error("shot-index %s out of range (0..%s)", args.shot_index, len(sequences) - 1)
+            return 1
+        sequences = [sequences[args.shot_index]]
+        _log.info(
+            "Single-shot subprocess mode — index %s: %s",
+            args.shot_index,
+            sequences[0].get("shot_name", "shot"),
+        )
+
     status = reporter_from_job_json(mount, cfg)
     if status:
         status.begin_run(f"AI Matte phase={phase}")
 
+    use_subprocess_batch = (
+        args.shot_index is None
+        and len(sequences) > 1
+        and bool(shared.get("batch_one_process_per_shot", True))
+    )
+
     try:
+        if use_subprocess_batch:
+            _log.info(
+                "Batch queue: %d shot(s), one fresh Python process each (like VDA engine)",
+                len(cfg.get("sequences") or []),
+            )
+            return _run_batch_one_process_per_shot(
+                job_path=job_path,
+                cfg=cfg,
+                phase=phase,
+                probe_first_frame=args.probe_first_frame,
+                status=status,
+            )
         return _run_sequences(
             cfg,
             mount,
@@ -426,6 +466,99 @@ def _between_shots_cleanup() -> None:
             snap["free_gb"],
             snap["allocated_gb"],
         )
+
+
+def _run_batch_one_process_per_shot(
+    *,
+    job_path: Path,
+    cfg: dict,
+    phase: str,
+    probe_first_frame: bool,
+    status: ColabRunStatus | None,
+) -> int:
+    """Feed shots one after another — each shot = new ``ai_matte_colab_run.py`` process."""
+    import time
+
+    shared = cfg.get("shared_settings") or {}
+    all_sequences: list = cfg.get("sequences") or []
+    shot_total = len(all_sequences)
+    gap_s = max(0, int(shared.get("batch_gap_seconds", 5)))
+    runner = Path(__file__).resolve()
+    succeeded: list[str] = []
+    failed: list[str] = []
+
+    print("\n" + "=" * 60, flush=True)
+    print(f"BATCH QUEUE — {shot_total} shot(s), sequential (one process per shot)", flush=True)
+    print("=" * 60, flush=True)
+
+    for shot_idx, seq in enumerate(all_sequences):
+        shot_name = str(seq.get("shot_name", "shot"))
+        shot_num = shot_idx + 1
+
+        if shot_idx > 0 and gap_s > 0:
+            _log.info("Cooling %ds before next shot (VDA-style gap)…", gap_s)
+            time.sleep(gap_s)
+
+        _print_shot_banner(shot_num, shot_total, shot_name)
+        if status:
+            status.shot_begin(shot_name, shot_num, shot_total)
+
+        cmd = [
+            sys.executable,
+            str(runner),
+            "--job-json",
+            str(job_path),
+            "--phase",
+            phase,
+            "--shot-index",
+            str(shot_idx),
+        ]
+        if probe_first_frame and shot_idx == 0:
+            cmd.append("--probe-first-frame")
+
+        _log.info("Launching shot subprocess: %s", " ".join(cmd))
+        env = os.environ.copy()
+        env["LAOV_BATCH_CHILD"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        if cmd[0] == sys.executable:
+            cmd = [sys.executable, "-u", *cmd[1:]]
+        result = subprocess.run(cmd, env=env)
+        code = int(result.returncode)
+
+        if code == 0:
+            succeeded.append(shot_name)
+            if status:
+                status.shot_end(shot_name, ok=True)
+            _log.info("Shot subprocess OK: %s", shot_name)
+        else:
+            failed.append(shot_name)
+            if status:
+                status.shot_end(shot_name, ok=False, message=f"exit {code}")
+            _log.error("Shot subprocess failed (exit %s): %s", code, shot_name)
+
+    print("\n" + "=" * 60, flush=True)
+    print("BATCH SUMMARY", flush=True)
+    print("=" * 60, flush=True)
+    for name in succeeded:
+        print(f"  OK   {name}", flush=True)
+    for name in failed:
+        print(f"  FAIL {name}", flush=True)
+    print(
+        f"\n{len(succeeded)}/{shot_total} succeeded, {len(failed)} failed.",
+        flush=True,
+    )
+
+    if failed:
+        if status:
+            status.finish_run(
+                ok=len(succeeded) > 0,
+                message=f"{len(succeeded)}/{shot_total} shots OK",
+            )
+        return 1 if not succeeded else 0
+
+    if status:
+        status.finish_run(ok=True)
+    return 0
 
 
 def _run_sequences(
@@ -696,4 +829,8 @@ def _run_sequences(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception:
+        print(traceback.format_exc(), flush=True)
+        raise SystemExit(1) from None

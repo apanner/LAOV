@@ -189,9 +189,15 @@ def reporter_from_job_json(mount: Path, cfg: dict) -> ColabRunStatus | None:
 
 def configure_flushed_logging() -> None:
     """Ensure log lines appear immediately in Colab notebook output."""
+    import sys
+
     root = logging.getLogger()
+    root.setLevel(logging.INFO)
     if not root.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        root.addHandler(handler)
     for handler in root.handlers:
         if not isinstance(handler, logging.StreamHandler):
             continue

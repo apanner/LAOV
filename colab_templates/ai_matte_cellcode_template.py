@@ -56,9 +56,41 @@ def load_ai_matte_config_cell2(drive_service, config_file_id):
 def _run_cmd(label: str, cmd: list[str], env: dict | None = None) -> None:
     print("\n[STEP] " + label)
     print("       " + " ".join(cmd))
-    r = subprocess.run(cmd, env=env)
+    run_env = (env or os.environ.copy())
+    run_env["PYTHONUNBUFFERED"] = "1"
+    r = subprocess.run(cmd, env=run_env)
     if r.returncode != 0:
         raise RuntimeError(label + " failed (exit " + str(r.returncode) + ")")
+
+
+def _stream_subprocess(cmd: list[str], env: dict) -> int:
+    """Stream child stdout/stderr into the notebook (Colab hides buffered output)."""
+    run_env = dict(env)
+    run_env["PYTHONUNBUFFERED"] = "1"
+    if cmd and cmd[0] == sys.executable:
+        cmd = [sys.executable, "-u", *cmd[1:]]
+    print("       " + " ".join(cmd), flush=True)
+    proc = subprocess.Popen(
+        cmd,
+        env=run_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    tail: list[str] = []
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        tail.append(line)
+        if len(tail) > 120:
+            tail.pop(0)
+    code = int(proc.wait())
+    if code != 0 and tail:
+        print("\n[RUNNER] last lines before exit " + str(code) + ":", flush=True)
+        for line in tail[-40:]:
+            print(line, end="", flush=True)
+    return code
 
 
 def _run_colab_host_job(config_path: str, laov_git: str, date_folder: str) -> bool:
@@ -117,15 +149,16 @@ def _run_colab_host_job(config_path: str, laov_git: str, date_folder: str) -> bo
         phase,
     ]
     print("\n[STEP] Run batch — matte_pipeline_phase=" + phase)
-    r = subprocess.run(cmd, env=env)
-    if r.returncode != 0:
+    exit_code = _stream_subprocess(cmd, env)
+    if exit_code != 0:
         print(
-            "\n[STOP] Batch finished with code %s — see BATCH SUMMARY above. "
-            "Failed shots are skipped; OK shots are on Drive. "
-            "Re-run with matte_pipeline_phase=refine for shots that have matte_sam3/ only."
-            % r.returncode
+            "\n[STOP] ai_matte_colab_run.py exited with code %s (see output above). "
+            "Common fixes: SAM3/BiRefNet under MyDrive/VDA_models/, plate path in JSON, "
+            "HF token for gated SAM3. Partial batch: re-run phase=refine if matte_sam3/ exists."
+            % exit_code,
+            flush=True,
         )
-    return r.returncode == 0
+    return exit_code == 0
 
 
 def process_ai_matte_cell3(

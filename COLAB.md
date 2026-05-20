@@ -155,7 +155,8 @@ MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_0
 | `matte_birefnet/*_matte_r.1001.exr` files | Same — old export | Expect `*_birefnet_matte.1001.exr` only (one file per frame). |
 | ViTMatte `CUDA out of memory` on full-res plate | ViTDet attention is O(pixels²); old code stacked 50×4K RGB in RAM | Push LAOV: **JPEG plate cache**, **one frame at a time**, **crop** infer, GPU unload after BiRefNet. **`max_inference_long_edge: 0`** = auto from GPU (40GB A100 → 2048, 24GB → 1536, 16GB → 1024). Override: env `AI_MATTE_VITMATTE_MAX_EDGE=1536` or JSON field. |
 | Job dies during `SAM3: track … video propagate` (no Python traceback) | **RAM** — e.g. 395×4K float32 stack ≈ **39 GiB** | Default **`sam3_max_plate_stack_gb: 14`** downscales SAM3 tracking, **full-res masks** for BiRefNet. Log: `tracking at WxH, masks upscaled to full plate`. |
-| Multi-shot batch stops at first failure | By design — check log for failed shot name | Other shots in the same batch are skipped after first error; re-send batch or run `refine` phase for completed `matte_sam3/` shots. |
+| Multi-shot batch stops at first failure | Old in-process batch | Default **`batch_one_process_per_shot: true`**: each shot runs in a **new Python process** (like VDA). Failed shots are skipped; others continue. See **BATCH SUMMARY** at end. |
+| Cell 3 shows `[STOP]` with no error above | Buffered subprocess output | Re-upload cellcode from Desk (streams runner with `python -u`). Look for `[ai_matte_colab_run] starting` and `ERROR` lines. |
 
 Example QC MP4:
 
