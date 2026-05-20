@@ -407,6 +407,27 @@ def main() -> int:
         return 1
 
 
+def _print_shot_banner(shot_index: int, shot_total: int, shot_name: str) -> None:
+    """VDA-style per-shot separator in Colab logs."""
+    print("\n" + "=" * 60, flush=True)
+    print(f"SHOT {shot_index}/{shot_total}: {shot_name}", flush=True)
+    print("=" * 60, flush=True)
+
+
+def _between_shots_cleanup() -> None:
+    """Clear GPU between shots so one failure/OOM does not poison the next."""
+    from live_action_aov.executors.gpu_release import clear_vram_cache, cuda_vram_snapshot
+
+    clear_vram_cache()
+    snap = cuda_vram_snapshot()
+    if snap:
+        _log.info(
+            "Between shots VRAM: free %.1f GiB, allocated %.1f GiB",
+            snap["free_gb"],
+            snap["allocated_gb"],
+        )
+
+
 def _run_sequences(
     cfg: dict,
     mount: Path,
@@ -472,13 +493,22 @@ def _run_sequences(
     birefnet_model_dir = lcr._resolve_birefnet_model_dir(mount, shared)
     vitmatte_model_dir = lcr._resolve_vitmatte_model_dir(mount, shared)
 
-    any_failed = False
     shot_total = len(sequences)
+    succeeded: list[str] = []
+    failed: list[str] = []
+    _log.info("AI Matte batch — %d shot(s), continue on per-shot errors (VDA-style)", shot_total)
+
     for shot_idx, seq in enumerate(sequences):
         rel_side = str(seq.get("sidecar_output_drive_subpath", "")).strip().strip("/").replace("\\", "/")
         shot_name = str(seq.get("shot_name", "shot"))
+        shot_num = shot_idx + 1
+
+        if shot_idx > 0:
+            _between_shots_cleanup()
+
+        _print_shot_banner(shot_num, shot_total, shot_name)
         if status:
-            status.shot_begin(shot_name, shot_idx + 1, shot_total)
+            status.shot_begin(shot_name, shot_num, shot_total)
 
         try:
             if status:
@@ -487,11 +517,11 @@ def _run_sequences(
                 mount, seq
             )
         except FileNotFoundError as exc:
-            _log.error("%s", exc)
+            _log.error("[%s] preflight failed: %s", shot_name, exc)
+            failed.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=False, message="plate preflight failed")
-                status.finish_run(ok=False)
-            return 1
+            continue
 
         if rel_side:
             if date_folder:
@@ -529,7 +559,7 @@ def _run_sequences(
                     shot_name,
                     sam3_artifact_path(sam3_stage),
                 )
-                any_failed = True
+                failed.append(shot_name)
                 if status:
                     status.shot_end(shot_name, ok=False, message="SAM3 artifacts missing")
                 continue
@@ -589,28 +619,31 @@ def _run_sequences(
             laov_run(job, progress_callback=progress_cb)
         except MemoryError:
             _log.error(
-                "Run failed for %s: out of memory. For long 4K clips use proxy in Desk "
-                "or lower sam3_max_plate_stack_gb (auto SAM3 downscale is enabled by default).",
+                "[%s] out of memory — skipping shot (others continue). "
+                "Long 4K: sam3_max_plate_stack_gb auto-downscale is on; try proxy in Desk.",
                 shot_name,
             )
+            failed.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=False, message="out of memory")
-            any_failed = True
+            _between_shots_cleanup()
             continue
         except Exception:
             _log.error("Run failed for %s:\n%s", shot_name, traceback.format_exc())
+            failed.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=False, message="engine error")
-            any_failed = True
+            _between_shots_cleanup()
             continue
 
         if shot.status != "done":
             _log.error("Shot %s status=%s (expected done)", shot_name, shot.status)
+            failed.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=False, message=str(shot.status))
-            any_failed = True
         else:
             _log.info("Done shot=%s", shot_name)
+            succeeded.append(shot_name)
             if status:
                 status.shot_end(shot_name, ok=True)
             if output_dir and bool(shared.get("qc_mp4", True)):
@@ -631,14 +664,31 @@ def _run_sequences(
                 except Exception as exc:
                     _log.warning("QC MP4 export failed for %s: %s", shot_name, exc)
 
-    if any_failed:
-        _log.error(
-            "AI Matte batch finished with failures — successful shots kept outputs; "
-            "re-run with matte_pipeline_phase=refine for shots that only need BiRefNet/ViTMatte."
+    print("\n" + "=" * 60, flush=True)
+    print("BATCH SUMMARY", flush=True)
+    print("=" * 60, flush=True)
+    for name in succeeded:
+        print(f"  OK   {name}", flush=True)
+    for name in failed:
+        print(f"  FAIL {name}", flush=True)
+    print(
+        f"\n{len(succeeded)}/{shot_total} succeeded, {len(failed)} failed.",
+        flush=True,
+    )
+
+    if failed:
+        _log.warning(
+            "Batch partial — failed: %s. Successful outputs kept on Drive. "
+            "Re-run phase=refine for shots that already have matte_sam3/.",
+            ", ".join(failed),
         )
         if status:
-            status.finish_run(ok=False)
-        return 1
+            status.finish_run(
+                ok=len(succeeded) > 0,
+                message=f"{len(succeeded)}/{shot_total} shots OK",
+            )
+        return 1 if not succeeded else 0
+
     _log.info("AI Matte — all %d sequence(s) complete.", shot_total)
     if status:
         status.finish_run(ok=True)

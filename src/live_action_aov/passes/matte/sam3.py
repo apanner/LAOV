@@ -51,6 +51,11 @@ from typing import Any
 
 import numpy as np
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None  # type: ignore[misc, assignment]
+
 from live_action_aov.core.pass_base import (
     License,
     PassType,
@@ -1018,9 +1023,15 @@ def _resize_rgb_plane(rgb: np.ndarray, work_h: int, work_w: int) -> np.ndarray:
     rgb = np.clip(np.asarray(rgb, dtype=np.float32)[..., :3], 0.0, 1.0)
     if rgb.shape[0] == work_h and rgb.shape[1] == work_w:
         return rgb
-    if cv2 is None:
-        raise ImportError("opencv-python-headless required for SAM3 plate resize")
-    return cv2.resize(rgb, (work_w, work_h), interpolation=cv2.INTER_AREA)
+    if cv2 is not None:
+        return cv2.resize(rgb, (work_w, work_h), interpolation=cv2.INTER_AREA)
+    from PIL import Image
+
+    arr_u8 = (rgb * 255.0).astype(np.uint8)
+    return (
+        np.asarray(Image.fromarray(arr_u8, "RGB").resize((work_w, work_h), Image.BILINEAR))
+        / 255.0
+    ).astype(np.float32)
 
 
 def _resize_mask_plane(mask: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
@@ -1029,9 +1040,16 @@ def _resize_mask_plane(mask: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
         m = m[..., 0]
     if m.shape[0] == out_h and m.shape[1] == out_w:
         return m
-    if cv2 is None:
-        raise ImportError("opencv-python-headless required for SAM3 mask resize")
-    return cv2.resize(m, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+    if cv2 is not None:
+        return cv2.resize(m, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+    from PIL import Image
+
+    return (
+        np.asarray(
+            Image.fromarray((m * 255.0).astype(np.uint8), "L").resize((out_w, out_h), Image.BILINEAR)
+        )
+        / 255.0
+    ).astype(np.float32)
 
 
 def _build_sam3_plate_stack(
