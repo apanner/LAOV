@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 _log = logging.getLogger("colab_run_status")
+
+_keepalive_stop: threading.Event | None = None
+_keepalive_thread: threading.Thread | None = None
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -185,6 +189,40 @@ def reporter_from_job_json(mount: Path, cfg: dict) -> ColabRunStatus | None:
         total_sequences=len(sequences) or 1,
         sequences=sequences,
     )
+
+
+def start_colab_keepalive(
+    status: ColabRunStatus | None = None,
+    *,
+    interval_sec: int = 90,
+) -> None:
+    """Ping console + Drive status so Colab does not idle-timeout on long shots."""
+    global _keepalive_stop, _keepalive_thread
+    stop_colab_keepalive()
+    _keepalive_stop = threading.Event()
+
+    def _loop() -> None:
+        assert _keepalive_stop is not None
+        while not _keepalive_stop.wait(interval_sec):
+            msg = f"keepalive {_utc_now()}"
+            print(f"[STAGE] {msg}", flush=True)
+            if status is not None:
+                status._data["updated_at"] = _utc_now()
+                status._data["message"] = msg
+                status._write()
+
+    _keepalive_thread = threading.Thread(target=_loop, name="colab-keepalive", daemon=True)
+    _keepalive_thread.start()
+
+
+def stop_colab_keepalive() -> None:
+    global _keepalive_stop, _keepalive_thread
+    if _keepalive_stop is not None:
+        _keepalive_stop.set()
+    if _keepalive_thread is not None and _keepalive_thread.is_alive():
+        _keepalive_thread.join(timeout=2.0)
+    _keepalive_stop = None
+    _keepalive_thread = None
 
 
 def configure_flushed_logging() -> None:

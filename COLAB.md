@@ -157,6 +157,7 @@ MyDrive/VDA_output/20260519/AI_MATTE_output/TB_073_020_plate_v001/matte/TB_073_0
 | Job dies during `SAM3: track … video propagate` (no Python traceback) | **RAM** — e.g. 395×4K float32 stack ≈ **39 GiB** | Default **`sam3_max_plate_stack_gb: 14`** downscales SAM3 tracking, **full-res masks** for BiRefNet. Log: `tracking at WxH, masks upscaled to full plate`. |
 | Multi-shot batch stops at first failure | Old in-process batch | Default **`batch_one_process_per_shot: true`**: each shot runs in a **new Python process** (like VDA). Failed shots are skipped; others continue. See **BATCH SUMMARY** at end. |
 | Cell 3 shows `[STOP]` with no error above | Buffered subprocess output | Re-upload cellcode from Desk (streams runner with `python -u`). Look for `[ai_matte_colab_run] starting` and `ERROR` lines. |
+| Long shot “times out” / stalls on BiRefNet read | Old build loaded all EXR into RAM | **BiRefNet streams** one frame at a time + `_plate_jpeg_cache` on Drive. Logs every ~20 frames. `[STAGE] keepalive …` every 90s fights Colab idle disconnect. |
 
 Example QC MP4:
 

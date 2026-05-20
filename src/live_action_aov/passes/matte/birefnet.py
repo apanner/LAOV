@@ -6,10 +6,8 @@ Sequence feeding (Colab / ``ai_matte_colab_run.py``):
 
 1. ``OIIOExrReader`` (+ display transform) reads each plate frame → (H,W,3) [0,1]
 2. SAM3 ``sam3_matte`` produces per-track hard masks (T,H,W)
-3. This pass reads the **same** plate stack and, per hero track:
-   - ``full_frame`` (default): BiRefNet on the **entire** plate (matches README/handler)
-     then multiply by SAM3 mask to keep the tracked instance
-   - ``crop``: BiRefNet on SAM3 bbox crop only (less VRAM, can miss context)
+3. This pass reads plates **one frame at a time** (JPEG cache on disk for long 4K shots)
+   and, per hero track, runs BiRefNet on keyframes then fills between.
 
 BiRefNet is **not** temporal. With ``keyframe_stride`` > 1, inference runs on sparse
 keyframes only; ``fill_between_keyframes: true`` (AI Matte stage default) linearly
@@ -21,6 +19,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,10 @@ from live_action_aov.io.channels import (
 )
 from live_action_aov.passes.matte.birefnet_infer import BiRefNetSession
 from live_action_aov.passes.matte.keyframe_fill import fill_alpha_between_keyframes
+from live_action_aov.passes.matte.vitmatte_plate_cache import (
+    build_plate_jpeg_cache,
+    read_plate_jpeg,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -82,7 +87,7 @@ def _mask_bbox(mask: np.ndarray, pad: int) -> tuple[int, int, int, int]:
 
 class BiRefNetRefinerPass(UtilityPass):
     name = "birefnet_refiner"
-    version = "0.2.0"
+    version = "0.3.0"
     license = License(
         spdx="MIT",
         commercial_use=True,
@@ -106,8 +111,6 @@ class BiRefNetRefinerPass(UtilityPass):
     DEFAULT_PARAMS: dict[str, Any] = {
         "model_id": "ZhengPeng7/BiRefNet",
         "model_path": None,
-        # full_frame = official HF path (whole plate, then * SAM3 mask)
-        # crop = legacy bbox crop (faster, less like README)
         "inference_mode": "full_frame",
         "crop_pad": 32,
         "inference_size": 1024,
@@ -117,6 +120,10 @@ class BiRefNetRefinerPass(UtilityPass):
         "refine_foreground": True,
         "refine_radius": 90,
         "precision": "fp16",
+        "use_plate_jpeg_cache": True,
+        "plate_cache_dir": None,
+        "plate_cache_keep": False,
+        "plate_jpeg_quality": 92,
     }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -127,6 +134,8 @@ class BiRefNetRefinerPass(UtilityPass):
         self._hard_masks: dict[int, dict[str, Any]] = {}
         self._heroes: list[dict[str, Any]] = []
         self._refined: list[dict[str, Any]] = []
+        self._plate_cache_dir: Path | None = None
+        self._plate_cache_temp: Path | None = None
 
     def ingest_artifacts(self, artifacts: dict[str, dict[int, Any]]) -> None:
         hard = artifacts.get("sam3_hard_masks") or {}
@@ -162,6 +171,15 @@ class BiRefNetRefinerPass(UtilityPass):
             ],
             axis=0,
         )
+
+    def _dilate_frame(self, hard_t: np.ndarray) -> np.ndarray:
+        dilate = max(0, int(self.params.get("hard_mask_dilate", 5)))
+        if dilate <= 0:
+            return (hard_t > 0.5).astype(np.float32)
+        import cv2
+
+        kernel = np.ones((2 * dilate + 1, 2 * dilate + 1), np.uint8)
+        return cv2.dilate((hard_t > 0.5).astype(np.uint8), kernel).astype(np.float32)
 
     def _alpha_full_frame(
         self,
@@ -200,21 +218,84 @@ class BiRefNetRefinerPass(UtilityPass):
         full[y0:y1, x0:x1] = alpha_crop
         return full
 
-    def _refine_instance(
+    def _predict_frame(
         self,
-        plate_stack: np.ndarray,
-        hard_stack: np.ndarray,
+        session: BiRefNetSession,
+        rgb: np.ndarray,
+        hard_t: np.ndarray,
     ) -> np.ndarray:
-        T, H, W, _ = plate_stack.shape
-        session = self._get_session()
         mode = str(self.params.get("inference_mode", "full_frame")).strip().lower()
         pad = int(self.params.get("crop_pad", 32))
-        stride = max(1, int(self.params.get("keyframe_stride", 4)))
-        hard_proc = self._dilate_stack(hard_stack)
+        hard_proc = self._dilate_frame(hard_t)
+        if float(hard_proc.sum()) < 1.0:
+            return np.zeros(rgb.shape[:2], dtype=np.float32)
+        if mode == "crop":
+            return self._alpha_crop(session, rgb, hard_proc, pad)
+        return self._alpha_full_frame(session, rgb, hard_proc)
 
-        key_indices = sorted(
-            {t for t in range(T) if t % stride == 0} | {T - 1}
+    def _read_plate(
+        self,
+        frame_idx: int,
+        *,
+        reader: Any,
+        cache_dir: Path | None,
+    ) -> np.ndarray:
+        if cache_dir is not None:
+            return read_plate_jpeg(cache_dir, frame_idx)
+        rgb, _attrs = reader.read_frame(frame_idx)
+        return np.clip(np.asarray(rgb, dtype=np.float32)[..., :3], 0.0, 1.0)
+
+    def _setup_plate_cache(
+        self,
+        reader: Any,
+        frame_range: tuple[int, int],
+    ) -> Path | None:
+        if not bool(self.params.get("use_plate_jpeg_cache", True)):
+            return None
+        explicit = self.params.get("plate_cache_dir")
+        if explicit:
+            cache_dir = Path(str(explicit)).expanduser().resolve()
+            self._plate_cache_dir = cache_dir
+            self._plate_cache_temp = None
+        else:
+            cache_dir = Path(tempfile.mkdtemp(prefix="birefnet_plate_"))
+            self._plate_cache_dir = cache_dir
+            self._plate_cache_temp = cache_dir
+
+        first, last = frame_range
+        n = last - first + 1
+        log_every = max(10, n // 20)
+        _log.info("BiRefNet: building plate JPEG cache → %s", cache_dir)
+        build_plate_jpeg_cache(
+            reader.read_frame,
+            frame_range,
+            cache_dir,
+            jpeg_quality=int(self.params.get("plate_jpeg_quality", 92)),
+            log_every=log_every,
+            log_label="BiRefNet",
         )
+        return cache_dir
+
+    def _cleanup_plate_cache(self) -> None:
+        if bool(self.params.get("plate_cache_keep", False)):
+            return
+        if self._plate_cache_temp is not None and self._plate_cache_temp.is_dir():
+            shutil.rmtree(self._plate_cache_temp, ignore_errors=True)
+        self._plate_cache_temp = None
+
+    def _refine_instance_streaming(
+        self,
+        read_plate_at: Callable[[int], np.ndarray],
+        hard_stack: np.ndarray,
+        *,
+        first_frame: int,
+        n_frames: int,
+    ) -> np.ndarray:
+        T, H, W = int(hard_stack.shape[0]), int(hard_stack.shape[1]), int(hard_stack.shape[2])
+        session = self._get_session()
+        stride = max(1, int(self.params.get("keyframe_stride", 1)))
+        hard_proc = self._dilate_stack(hard_stack)
+        key_indices = sorted({t for t in range(T) if t % stride == 0} | {T - 1})
         refined_keys: dict[int, np.ndarray] = {}
         n_keys = len(key_indices)
         log_step = max(1, n_keys // 10)
@@ -222,22 +303,21 @@ class BiRefNetRefinerPass(UtilityPass):
         for ki, t in enumerate(key_indices):
             if ki == 0 or ki == n_keys - 1 or (ki % log_step) == 0:
                 _log.info(
-                    "BiRefNet: keyframe %d/%d (local frame %d / %d)",
+                    "BiRefNet: keyframe %d/%d (frame %s / %s)",
                     ki + 1,
                     n_keys,
-                    t,
-                    T,
+                    first_frame + t,
+                    first_frame + n_frames - 1,
                 )
             hard_t = hard_proc[t]
             if float(hard_t.sum()) < 1.0:
                 refined_keys[t] = np.zeros((H, W), dtype=np.float32)
                 continue
-            rgb = plate_stack[t]
-            if mode == "crop":
-                alpha = self._alpha_crop(session, rgb, hard_t, pad)
-            else:
-                alpha = self._alpha_full_frame(session, rgb, hard_t)
-            refined_keys[t] = alpha
+            rgb = read_plate_at(first_frame + t)
+            refined_keys[t] = self._predict_frame(session, rgb, hard_stack[t])
+            from live_action_aov.executors.gpu_release import clear_vram_cache
+
+            clear_vram_cache(sync=False)
 
         fill_between = bool(self.params.get("fill_between_keyframes", True))
         return fill_alpha_between_keyframes(
@@ -268,53 +348,70 @@ class BiRefNetRefinerPass(UtilityPass):
     ) -> dict[int, dict[str, np.ndarray]]:
         first, last = frame_range
         n_frames = last - first + 1
-        _log.info("BiRefNet: reading %d plate frames (%s-%s)…", n_frames, first, last)
-        # Plate sequence: same OIIO path as SAM3 (EXR/JPG, display transform, proxy).
-        frames = np.stack(
-            [reader.read_frame(f)[0] for f in range(first, last + 1)], axis=0
-        ).astype(np.float32, copy=False)
-        if frames.ndim != 4 or frames.shape[-1] < 3:
-            raise ValueError(f"Plate stack must be (T,H,W,3+), got {frames.shape}")
-        frames = frames[..., :3]
-        plate_h, plate_w = int(frames.shape[1]), int(frames.shape[2])
+        from live_action_aov.executors.gpu_release import clear_vram_cache
 
-        channel_stacks: dict[str, np.ndarray] = {
-            ch: np.zeros((n_frames, plate_h, plate_w), dtype=np.float32)
-            for ch in _SLOT_TO_CHANNEL.values()
-        }
-        self._refined = []
-        _log.info("BiRefNet: refining %d hero matte(s)", len(self._heroes))
-        for hero in self._heroes:
-            slot = str(hero.get("slot", ""))
-            channel = _SLOT_TO_CHANNEL.get(slot)
-            if channel is None:
-                continue
-            track_id = int(hero["track_id"])
-            entry = self._hard_masks.get(track_id)
-            if not entry:
-                continue
-            stack = entry.get("stack")
-            if stack is None:
-                continue
-            hard_stack = np.asarray(stack, dtype=np.float32)
-            if hard_stack.shape[0] != n_frames:
-                continue
-            _log.info("BiRefNet: hero track_id=%s slot=%s", track_id, slot)
-            soft = self._refine_instance(frames, hard_stack)
-            channel_stacks[channel] = soft
-            self._refined.append(
-                {
-                    "track_id": track_id,
-                    "slot": slot,
-                    "label": entry.get("label", hero.get("label", "")),
-                }
-            )
+        clear_vram_cache()
+        _log.info(
+            "BiRefNet: streaming %d frames (%s-%s), stride=%s, mode=%s",
+            n_frames,
+            first,
+            last,
+            self.params.get("keyframe_stride", 1),
+            self.params.get("inference_mode", "full_frame"),
+        )
 
-        per_frame: dict[int, dict[str, np.ndarray]] = {}
-        for i in range(n_frames):
-            f = first + i
-            per_frame[f] = {ch: channel_stacks[ch][i] for ch in channel_stacks}
-        return per_frame
+        cache_dir = self._setup_plate_cache(reader, frame_range)
+        try:
+            probe = self._read_plate(first, reader=reader, cache_dir=cache_dir)
+            plate_h, plate_w = int(probe.shape[0]), int(probe.shape[1])
+
+            channel_stacks: dict[str, np.ndarray] = {
+                ch: np.zeros((n_frames, plate_h, plate_w), dtype=np.float32)
+                for ch in _SLOT_TO_CHANNEL.values()
+            }
+            self._refined = []
+
+            def read_plate_at(frame_idx: int) -> np.ndarray:
+                return self._read_plate(frame_idx, reader=reader, cache_dir=cache_dir)
+
+            _log.info("BiRefNet: refining %d hero matte(s)", len(self._heroes))
+            for hero in self._heroes:
+                slot = str(hero.get("slot", ""))
+                channel = _SLOT_TO_CHANNEL.get(slot)
+                if channel is None:
+                    continue
+                track_id = int(hero["track_id"])
+                entry = self._hard_masks.get(track_id)
+                if not entry:
+                    continue
+                stack = entry.get("stack")
+                if stack is None:
+                    continue
+                hard_stack = np.asarray(stack, dtype=np.float32)
+                if hard_stack.shape[0] != n_frames:
+                    continue
+                _log.info("BiRefNet: hero track_id=%s slot=%s", track_id, slot)
+                channel_stacks[channel] = self._refine_instance_streaming(
+                    read_plate_at,
+                    hard_stack,
+                    first_frame=first,
+                    n_frames=n_frames,
+                )
+                self._refined.append(
+                    {
+                        "track_id": track_id,
+                        "slot": slot,
+                        "label": entry.get("label", hero.get("label", "")),
+                    }
+                )
+
+            per_frame: dict[int, dict[str, np.ndarray]] = {}
+            for i in range(n_frames):
+                f = first + i
+                per_frame[f] = {ch: channel_stacks[ch][i] for ch in channel_stacks}
+            return per_frame
+        finally:
+            self._cleanup_plate_cache()
 
     def emit_artifacts(self) -> dict[str, dict[int, Any]]:
         if not self._refined:

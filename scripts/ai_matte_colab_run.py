@@ -63,6 +63,7 @@ AI_MATTE_DEFAULTS = {
     "vitmatte_inference_mode": "crop",
     "vitmatte_crop_pad": 32,
     "use_plate_jpeg_cache": True,
+    "plate_cache_keep": True,
     "plate_jpeg_quality": 92,
     # SAM3: auto downscale tracking when 4K×long clips would exceed ~14 GiB RAM.
     "sam3_max_plate_stack_gb": 14.0,
@@ -409,6 +410,9 @@ def main() -> int:
     status = reporter_from_job_json(mount, cfg)
     if status:
         status.begin_run(f"AI Matte phase={phase}")
+    from colab_run_status import start_colab_keepalive, stop_colab_keepalive
+
+    start_colab_keepalive(status, interval_sec=90)
 
     use_subprocess_batch = (
         args.shot_index is None
@@ -445,6 +449,8 @@ def main() -> int:
         if status:
             status.finish_run(ok=False)
         return 1
+    finally:
+        stop_colab_keepalive()
 
 
 def _print_shot_banner(shot_index: int, shot_total: int, shot_name: str) -> None:
@@ -718,19 +724,21 @@ def _run_sequences(
         )
         if vitmatte_model_dir:
             os.environ["AI_MATTE_VITMATTE_MODEL_PATH"] = vitmatte_model_dir
-        pass_configs = [
-            PassConfig(
-                name=name,
-                params=lcr._matte_pass_params(
-                    name,
-                    shared,
-                    seq,
-                    sam3_model_dir=sam3_model_dir,
-                    birefnet_model_dir=birefnet_model_dir,
-                ),
+        pass_configs = []
+        for name in pass_names:
+            params = lcr._matte_pass_params(
+                name,
+                shared,
+                seq,
+                sam3_model_dir=sam3_model_dir,
+                birefnet_model_dir=birefnet_model_dir,
             )
-            for name in pass_names
-        ]
+            if output_dir is not None and name in ("birefnet_refiner", "vitmatte_refiner"):
+                cache_dir = (output_dir / "_plate_jpeg_cache").resolve()
+                params.setdefault("use_plate_jpeg_cache", True)
+                params.setdefault("plate_cache_dir", str(cache_dir))
+                params.setdefault("plate_cache_keep", True)
+            pass_configs.append(PassConfig(name=name, params=params))
         post_configs: list[PostConfig] = []
         if phase == "temporal" or (
             phase == "all" and "flow" in pass_names and _should_run_matte_temporal(shared)

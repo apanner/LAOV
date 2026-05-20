@@ -182,6 +182,10 @@ def _matte_pass_params(
             "refine_radius",
             "precision",
             "fill_between_keyframes",
+            "use_plate_jpeg_cache",
+            "plate_cache_dir",
+            "plate_cache_keep",
+            "plate_jpeg_quality",
         ):
             val = matte.get(key, shared.get(key))
             if val is not None:

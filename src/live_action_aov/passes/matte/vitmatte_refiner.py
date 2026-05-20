@@ -235,11 +235,15 @@ class ViTMatteRefinerPass(UtilityPass):
             self._plate_cache_temp = cache_dir
 
         _log.info("ViTMatte: building full-res JPEG plate cache → %s", cache_dir)
+        first, last = frame_range
+        n = last - first + 1
         build_plate_jpeg_cache(
             reader.read_frame,
             frame_range,
             cache_dir,
             jpeg_quality=int(self.params.get("plate_jpeg_quality", 92)),
+            log_every=max(10, n // 20),
+            log_label="ViTMatte",
         )
         return cache_dir
 

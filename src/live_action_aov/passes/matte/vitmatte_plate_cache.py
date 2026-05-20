@@ -39,6 +39,7 @@ def build_plate_jpeg_cache(
     *,
     jpeg_quality: int = 92,
     log_every: int = 25,
+    log_label: str = "Plate",
 ) -> tuple[int, int]:
     """Write one full-res JPEG per plate frame. Returns ``(height, width)``."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -70,12 +71,13 @@ def build_plate_jpeg_cache(
         )
         written += 1
         if log_every > 0 and (i == 0 or i == n - 1 or (i + 1) % log_every == 0):
-            _log.info("ViTMatte plate cache: %d/%d frames (%s)", i + 1, n, cache_dir)
+            _log.info("%s plate cache: %d/%d frames (%s)", log_label, i + 1, n, cache_dir)
 
     if plate_h == 0 or plate_w == 0:
-        raise RuntimeError(f"ViTMatte plate cache empty under {cache_dir}")
+        raise RuntimeError(f"{log_label} plate cache empty under {cache_dir}")
     _log.info(
-        "ViTMatte plate cache ready: %s (%dx%d, %d new JPEGs)",
+        "%s plate cache ready: %s (%dx%d, %d new JPEGs)",
+        log_label,
         cache_dir,
         plate_w,
         plate_h,
